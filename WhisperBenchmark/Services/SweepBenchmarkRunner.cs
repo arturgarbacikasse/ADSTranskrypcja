@@ -50,8 +50,10 @@ public sealed class SweepBenchmarkRunner
 
     private static BenchmarkSettings Clone(BenchmarkSettings src) => new()
     {
+        DefaultMode = src.DefaultMode,
         InputDirectory = src.InputDirectory,
         OutputDirectory = src.OutputDirectory,
+        SingleSampleFile = src.SingleSampleFile,
         Pattern = src.Pattern,
         FileNameRegex = src.FileNameRegex,
         DurationMinutes = src.DurationMinutes,

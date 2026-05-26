@@ -12,7 +12,8 @@ Odpowiedzieć na pytania:
 
 - Ile godzin audio jest w stanie przerobić jedna karta GPU w ciągu jednej godziny zegara ściennego? (`audioHoursPerHour` ≈ `rtf`)
 - Ile plików / "legów rozmów" jest w stanie przerobić na godzinę? (`filesPerHour`)
-- Ile pełnych callId-ów jest w stanie domknąć? (`callsPerHour`)
+- Ile pełnych interakcji (`interactionId`) jest w stanie domknąć? (`interactionsPerHour` / `callsPerHour`)
+- **Ile czasu zajmie przetworzenie całego realnego datasetu?** (tryb `dataset` – rekomendowany)
 - Jak wartość `GpuConcurrency` wpływa na powyższe metryki (tryb `sweep`)?
 
 ---
@@ -30,7 +31,7 @@ Odpowiedzieć na pytania:
 
 ### Oprogramowanie
 
-- **.NET 10 SDK** (lub .NET 10 runtime + samodzielnie zbudowany artefakt).
+- **.NET 10 SDK** (lub .NET 10 runtime + samodzielnie zbudowany artefakt). Instalacja krok po kroku: `PreKonfiguracja-Ubuntu-24.04-LTS.md`.
 - Pakiety Whisper.net w wersji `1.9.1-preview1`:
   - `Whisper.net`
   - `Whisper.net.Runtime` – fallback CPU
@@ -46,36 +47,44 @@ Odpowiedzieć na pytania:
 
 ## 3. Format plików wejściowych
 
-Aplikacja oczekuje, że folder `InputDirectory` zawiera już gotowe pliki WAV:
+Aplikacja oczekuje, że folder `InputDirectory` zawiera **podkatalogi** (po jednym na interakcję/rozmowę). W każdym podkatalogu leżą gotowe pliki WAV:
 
 - **mono**
 - **16 kHz**
 - **PCM 16-bit**
 
-Nazewnictwo:
+Struktura katalogów:
 
 ```
-{callId}_{participantId}.wav
+InputDirectory/
+  {interactionId}/
+    {interactionId}_{participantId}.wav
 ```
 
 Przykład datasetu:
 
 ```
-/data/input/call001_1.wav
-/data/input/call001_2.wav
-/data/input/call002_1.wav
-/data/input/call002_2.wav
-/data/input/call003_1.wav
+/data/input/
+  100/
+    100_1.wav
+    100_2.wav
+  101/
+    101_1.wav
+  102/
+    102_1.wav
+    102_2.wav
 ```
 
 Interpretacja:
 
-- `callId` = część przed **ostatnim** podkreśleniem
+- `interactionId` = nazwa podkatalogu oraz prefiks w nazwie pliku (część przed **ostatnim** podkreśleniem)
 - `participantId` = część po ostatnim podkreśleniu, przed `.wav`
-- Jeden plik WAV = jeden job GPU.
-- Agregat per `callId` jest budowany na końcu (`benchmark-calls.csv`).
+- Prefiks w nazwie pliku musi być **zgodny** z nazwą katalogu (np. w `100/` tylko `100_*.wav`)
+- Pliki WAV w katalogu głównym `InputDirectory` (bez podfolderu) są odrzucane
+- Jeden plik WAV = jeden job GPU
+- Agregat per `interactionId` trafia do `benchmark-calls.csv` (kolumny `interactionId` i `callId` – ta sama wartość)
 
-Plik niezgodny z formatem (np. stereo, 48 kHz, mp3) jest odrzucany w fazie walidacji i ląduje w `errors.json`. Benchmark działa dalej, dopóki jest jakikolwiek poprawny plik.
+Plik niezgodny z formatem (np. stereo, 48 kHz, mp3, zły katalog) jest odrzucany w fazie walidacji i ląduje w `errors.json`. Benchmark działa dalej, dopóki jest jakikolwiek poprawny plik.
 
 ---
 
@@ -84,8 +93,10 @@ Plik niezgodny z formatem (np. stereo, 48 kHz, mp3) jest odrzucany w fazie walid
 ```json
 {
   "Benchmark": {
-    "InputDirectory": "/data/input",
+    "DefaultMode": "dataset",
+    "InputDirectory": "./Data/Input",
     "OutputDirectory": "/data/output",
+    "SingleSampleFile": "/data/input/100/100_1.wav",
     "Pattern": "*.wav",
     "FileNameRegex": "^(?<callId>.+)_(?<participantId>\\d+)\\.wav$",
 
@@ -141,48 +152,82 @@ Wbudowane tryby:
 Szybki sanity check: transkrybuje jeden konkretny plik, drukuje wynik, zapisuje minimalny raport.
 
 ```bash
-dotnet run -c Release --project WhisperBenchmark -- \
-    single --file /data/input/call001_1.wav
+dotnet run -c Release --no-launch-profile --project WhisperBenchmark -- \
+    single --file /data/input/100/100_1.wav
 ```
 
-### 5.2 `soak` – test obciążeniowy
+> Użyj `--no-launch-profile`, jeśli podajesz własne argumenty z terminala – inaczej `dotnet run` może dołączyć argumenty z `launchSettings.json` (komunikat „Używanie ustawień uruchamiania z profilu…”).
 
-Główny tryb POC. Działa zadany czas, ładuje GPU do `GpuConcurrency` równoległych transkrypcji, opcjonalnie zapętla dataset.
+### 5.2 `dataset` – przetwarzanie całego realnego datasetu (rekomendowany)
+
+Symuluje dzień pracy: bierze cały `InputDirectory`, przetwarza każdy plik WAV **dokładnie raz** i kończy po domknięciu datasetu.
+
+- **Nie** używa `DurationMinutes` ani zapętlania (`RepeatInputUntilDurationEnds` jest ignorowane).
+- **Nie** robi warmupu (wynik jest prostszy do interpretacji).
+- Model ładowany przy starcie: **jedna instancja GGML na każdy slot** `GpuConcurrency` (bezpieczna równoległość CUDA; na laptopie 4 GB zwykle `GpuConcurrency=1`).
+- Raport `benchmark-summary.json` zawiera m.in. `datasetAudioHours`, `wallClockMinutes`, `rtf`, `audioHoursPerHour`, `capacityPrediction`.
+
+```bash
+cd WhisperBenchmark
+dotnet run -c Release --no-launch-profile -- \
+  dataset \
+  --input ./Data/Input \
+  --output ./Data/Output \
+  --gpu-concurrency 1
+```
+
+> Na laptopie z **4 GB VRAM** (np. RTX 3050) używaj `--gpu-concurrency 1`. Wartość `4` jest sensowna na serwerze z L40 48 GB.
+
+Opcje dodatkowe: `--max-files`, `--write-transcription-json`, `--collect-gpu-metrics`, `--shuffle`.
+
+Po sukcesie w konsoli pojawi się **`DATASET BENCHMARK FINISHED`** i **`Raport zapisany w ./Data/Output`**. W `benchmark-summary.json` sprawdź `"mode": "dataset"`.
+
+Log na żywo (co `MetricsIntervalSeconds`):
+
+```text
+[00:10:00] mode=dataset files=420/1000 interactions=180/500 audio=3.42h elapsed=10m rtf=20.5x active=4 queue=580 errors=0
+```
+
+### 5.3 `soak` – test obciążeniowy przez zadany czas
+
+Działa zadany czas, ładuje GPU do `GpuConcurrency` równoległych transkrypcji, opcjonalnie zapętla dataset.
 
 ```bash
 dotnet run -c Release --project WhisperBenchmark -- \
     soak \
-    --input /data/input \
-    --output /data/output \
-    --duration-minutes 60 \
+    --input /home/aubuntu/ADSTranskrypcja/WhisperBenchmark/Data/Input \
+    --output /home/aubuntu/ADSTranskrypcja/WhisperBenchmark/Data/Output \
+    --duration-minutes 10 \
     --gpu-concurrency 4
 ```
 
-### 5.3 `sweep` – porównanie wielu wartości concurrency
+### 5.4 `sweep` – porównanie wielu wartości concurrency
 
 ```bash
 dotnet run -c Release --project WhisperBenchmark -- \
     sweep \
-    --input /data/input \
-    --output /data/output \
+    --input /home/aubuntu/ADSTranskrypcja/WhisperBenchmark/Data/Input \
+    --output /home/aubuntu/ADSTranskrypcja/WhisperBenchmark/Data/Output \
     --duration-minutes 10 \
     --concurrency 1,2,4,8,16
 ```
 
 Każdy krok sweepu trafia do podkatalogu `sweep-c<N>/`, a porównanie zbiorcze do `benchmark-sweep.csv`.
 
-### 5.4 Pełna lista opcji CLI
+### 5.5 Pełna lista opcji CLI
 
 | Opcja | Opis |
 |------|------|
 | `--file <path>` | Plik do transkrypcji (tryb `single`). |
 | `--input <dir>` | Katalog wejściowy – override `Benchmark.InputDirectory`. |
 | `--output <dir>` | Katalog wyjściowy – override `Benchmark.OutputDirectory`. |
-| `--duration-minutes <int>` | Czas fazy pomiarowej. |
+| `--duration-minutes <int>` | Czas fazy pomiarowej (`soak`/`sweep`; ignorowane w `dataset`). |
 | `--gpu-concurrency <int>` | Maksymalna liczba równoległych transkrypcji. |
 | `--concurrency 1,2,4,8` | Lista wartości GpuConcurrency dla trybu `sweep`. |
 | `--max-files <int>` | Twardy limit liczby plików. |
-| `--write-transcription-json true` | Zapisuje pełną transkrypcję per plik (kosztem narzutu I/O). |
+| `--write-transcription-json true/false` | Zapis pełnej transkrypcji per plik. |
+| `--collect-gpu-metrics true/false` | Zbieranie `nvidia-smi` → `gpu-metrics.csv`. |
+| `--shuffle true/false` | Losowa kolejność plików (`dataset`/`soak`). |
 | `--help` | Wypisuje pomoc. |
 
 ---
@@ -205,7 +250,51 @@ Pojedynczy plik na L40 z `large-v3-turbo` zwykle osiąga RTF ~10–30x; przy `Gp
 
 ## 7. Jak interpretować wynik
 
-Po zakończeniu testu znajdź `benchmark-summary.json`. Najważniejsze pola:
+### Tryb `dataset` (rekomendowany)
+
+Po zakończeniu znajdź `benchmark-summary.json` (`"mode": "dataset"`):
+
+```json
+{
+  "mode": "dataset",
+  "datasetAudioHours": 8.0,
+  "wallClockMinutes": 22.03,
+  "rtf": 21.79,
+  "audioHoursPerHour": 21.79,
+  "processingTimePercentOfAudioDuration": 4.59,
+  "interactionsPerHour": 1361.5,
+  "capacityPrediction": {
+    "processingTimeFor8AudioHoursMinutes": 22.03,
+    "processingTimeFor100AudioHoursMinutes": 275.36
+  }
+}
+```
+
+**Interpretacja:**
+
+- Do aplikacji wrzucono **8 h audio** (`datasetAudioHours`).
+- GPU przetworzyło to w **22,03 min** (`wallClockMinutes`).
+- Maszyna działa **21,79×** szybciej niż real time (`rtf` / `audioHoursPerHour`).
+- Jedna godzina pracy tej maszyny przetwarza ok. **21,79 h audio**.
+
+**Predykcja czasu przetwarzania:**
+
+```
+czasPrzetwarzaniaMinuty = (audioHours / audioHoursPerHour) * 60
+```
+
+Przykłady przy `audioHoursPerHour = 21.79`:
+
+| Audio wejściowe | Czas przetwarzania |
+|----------------|-------------------|
+| 2 h | 5,51 min |
+| 8 h | 22,03 min |
+| 24 h | 66,09 min |
+| 100 h | 275,36 min |
+
+Pola `capacityPrediction.*` w JSON zawierają te same wartości gotowe do odczytu.
+
+### Tryb `soak` / `sweep`
 
 ```json
 {
@@ -220,14 +309,8 @@ Po zakończeniu testu znajdź `benchmark-summary.json`. Najważniejsze pola:
 ```
 
 - **`audioHoursPerHour` = `rtf`** – tyle godzin audio karta jest w stanie przerobić w ciągu zegarowej godziny.
-- **`callsPerHour`** – pełne callId-y domknięte w ciągu godziny.
+- **`callsPerHour`** – pełne interakcje domknięte w ciągu godziny.
 - **`p95FileProcessingSeconds`** – ogon czasów; ważne przy planowaniu kolejkowania / SLA.
-- **Szacunek calls/h niezależny od czasu testu**:
-  ```
-  estimatedCallsPerHourByAverageCallDuration =
-      (rtf * 3600) / averageCallAudioSeconds
-  ```
-  Wzór policz ręcznie z `benchmark-calls.csv` (kolumna `totalAudioSeconds` zsumowana / liczba calli = `averageCallAudioSeconds`).
 
 ---
 
@@ -270,11 +353,13 @@ i zapisuje do `gpu-metrics.csv`. Brak `nvidia-smi` w PATH skutkuje wyłącznie o
 
 ### `benchmark-files.csv`
 
-Kolumny: `file, fullPath, callId, participantId, audioSeconds, processingSeconds, queueWaitSeconds, rtf, startedAt, finishedAt, segmentCount, success, errorMessage`.
+Kolumny: `file, fullPath, interactionId, callId, participantId, audioSeconds, processingSeconds, queueWaitSeconds, rtf, startedAt, finishedAt, segmentCount, success, errorMessage`. (`interactionId` = `callId`).
 
 ### `benchmark-calls.csv`
 
-Kolumny: `callId, participants, files, totalAudioSeconds, completedFiles, failedFiles, totalProcessingSeconds, maxFileProcessingSeconds, completed`. Pola `participants` i `files` są listami sklejonymi znakiem `|`.
+Kolumny: `interactionId, callId, participants, files, totalAudioSeconds, completedFiles, failedFiles, interactionProcessingSeconds, firstFileStartedAt, lastFileFinishedAt, totalProcessingSeconds, maxFileProcessingSeconds, completed`.
+
+`interactionProcessingSeconds` = `lastFileFinishedAt − firstFileStartedAt` (uwzględnia równoległość nóg rozmowy).
 
 ### `benchmark-sweep.csv`
 
@@ -282,7 +367,7 @@ Kolumny: `gpuConcurrency, durationSeconds, processedFiles, processedCalls, proce
 
 ### `errors.json`
 
-Lista obiektów z polami `file, callId, participantId, stage, message, exception, timestamp`. `stage` to jedno z: `Scan`, `Validation`, `Warmup`, `Transcription`.
+Lista obiektów z polami `file, fullPath, interactionId, participantId, stage, message, exception, timestamp`. `stage`: `Scan`, `Validation`, `Warmup`, `Transcription`, `Report`.
 
 ### `transcriptions/{callId}_{participantId}.json`
 
@@ -305,15 +390,16 @@ Zapis wyniku transkrypcji (segmenty w sekundach od początku nagrania):
 ```
 
 - Tryb **`single`** zapisuje ten plik **zawsze** (segmenty są zbierane niezależnie od `WriteTranscriptionJson`).
-- Tryb **`soak`** / **`sweep`** – tylko gdy `WriteTranscriptionJson: true` (domyślnie `false`, żeby nie mierzyć narzutu I/O).
+- Tryb **`dataset`** / **`soak`** / **`sweep`** – tylko gdy `WriteTranscriptionJson: true` (domyślnie `false`, żeby nie mierzyć narzutu I/O).
 - **`WriteMergedCallJson: true`** – dodatkowo `transcriptions/call001.json` ze wszystkimi uczestnikami w polu `participants`.
 
 ---
 
 ## 10. Wskazówki praktyczne
 
-- **Warmup** – pierwsze N plików (`Benchmark.WarmupFiles`) jest przetwarzane przed startem pomiaru i ich wyniki **nie** są wliczane do `benchmark-summary.json`. Domyślne 5 plików stabilizuje runtime CUDA i cache modelu.
-- **Zapętlanie datasetu** – `RepeatInputUntilDurationEnds: true` pozwala mierzyć przez godzinę nawet jeśli plików jest mniej (np. 50 plików × kilka pętli).
+- **Tryb `dataset`** – bez warmupu i bez zapętlania; każdy poprawny plik przetwarzany dokładnie raz. Rekomendowany do planowania produkcji.
+- **Warmup (`soak`)** – pierwsze N plików (`Benchmark.WarmupFiles`) przed pomiarem; wyniki warmupu **nie** wliczają się do summary.
+- **Zapętlanie (`soak`)** – `RepeatInputUntilDurationEnds: true` pozwala mierzyć przez godzinę nawet przy małym datasetcie.
 - **Wyłącz I/O w pomiarze przepustowości** – pozostaw `WriteTranscriptionJson: false` (domyślnie). Zapis JSON-ów per plik włączaj tylko, gdy chcesz porównać jakość transkrypcji.
 - **GpuConcurrency** – na L40 48 GB z `large-v3-turbo` zwykle przydatne wartości to 2–8. Sweep pokaże, gdzie się nasyca pamięć/SM i przestaje rosnąć throughput.
 - **Anulowanie** – `Ctrl+C` zapisuje raport częściowy (z tego, co już zostało przetworzone).
@@ -328,8 +414,9 @@ Predefiniowane profile:
 
 | Profil | Co robi |
 |---|---|
+| `dataset (full input, GPU=1)` | **Rekomendowany:** cały `./Data/Input` przy `GpuConcurrency=1` (bezpieczne na laptopie). |
 | `help` | `--help`, drukuje pomoc i kończy. |
-| `single (sample WAV)` | `single --file ./Data/Input/call001_1.wav` – pojedynczy plik. |
+| `single (sample WAV)` | `single --file ./Data/Input/100/100_1.wav` – pojedynczy plik. |
 | `soak (2 min smoke test)` | `soak ... --duration-minutes 2 --gpu-concurrency 1` – szybki sanity check. |
 | `soak (60 min POC, GPU=4)` | Pełny POC: 60 minut przy `GpuConcurrency=4`. |
 | `soak (CPU fallback debug)` | Krótki test 3 plików z `WriteTranscriptionJson=true` – do debugowania. |
@@ -350,8 +437,7 @@ Predefiniowane profile:
    Komenda jest jawna, kopiowalna, identyczna na Windowsie i Linuxie:
    ```bash
    dotnet run --project WhisperBenchmark -c Release -- \
-       soak --input /data/input --output /data/output \
-            --duration-minutes 60 --gpu-concurrency 4
+       dataset --input /data/input --output /data/output --gpu-concurrency 4
    ```
 
 ### Working directory i ścieżki względne
@@ -365,9 +451,12 @@ Aplikacja oczekuje:
 ```
 WhisperBenchmark/
   Data/
-    Input/                       # tutaj wgraj WAV-y mono/16kHz/PCM-16
-      call001_1.wav
-      call001_2.wav
+    Input/                       # katalog główny datasetu
+      100/                       # interactionId
+        100_1.wav
+        100_2.wav
+      101/
+        101_1.wav
       ...
     Output/                      # tutaj lecą raporty
   Models/
@@ -416,12 +505,29 @@ Invoke-WebRequest `
 
 | Komunikat | Powód | Co zrobić |
 |---|---|---|
-| `Plik wejściowy nie istnieje: ./Data/Input/call001_1.wav` (tryb `single`) | Brak konkretnego pliku w `Data/Input/` | Wgraj plik, zmień ścieżkę w profilu albo użyj profilu `soak (2 min smoke test)`. |
-| `Brak poprawnych plików WAV w ./Data/Input` (tryb `soak`/`sweep`) | Folder jest pusty albo wszystkie pliki nie przeszły walidacji | Wgraj poprawne WAV-y (mono/16 kHz/PCM-16) z nazwą `{callId}_{participantId}.wav`. |
+| `Plik wejściowy nie istnieje: ./Data/Input/100/100_1.wav` (tryb `single`) | Brak konkretnego pliku | Utwórz podkatalog `interactionId` i wgraj plik `{interactionId}_{participantId}.wav`. |
+| `Brak poprawnych plików WAV w ./Data/Input` (tryb `soak`/`sweep`) | Brak podkatalogów, puste foldery albo wszystkie pliki nie przeszły walidacji | Struktura: `Input/{interactionId}/{interactionId}_{participantId}.wav` (mono/16 kHz/PCM-16). |
 | `Nie znaleziono pliku modelu Whispera: ./Models/ggml-large-v3-turbo.bin …` | Brak modelu w `Models/` i `AutoDownloadModel=false` | Pobierz model ręcznie (instrukcja wyżej) albo włącz `Transcription.AutoDownloadModel=true`. |
 | `Nie udało się rozpoznać typu modelu z nazwy pliku '…'` | Auto-downloader nie zmapował nazwy na `GgmlType` | Użyj nazwy zgodnej ze schematem `ggml-{model}[-{quant}].bin` albo wgraj plik ręcznie. |
 | `Nie udało się uruchomić nvidia-smi …` (warning) | Brak `nvidia-smi` w PATH (np. development na laptopie bez NVIDII) | Ignoruj – benchmark biegnie dalej, tylko `gpu-metrics.csv` jest pusty. Albo wyłącz `Benchmark.CollectGpuMetrics`. |
 | `Skonfigurowano UseGpu=true, ale Whisper.net załadował runtime CPU` | CUDA się nie wpięła (driver, wersja toolchaina, brak pakietu CUDA runtime) | Zainstaluj NVIDIA driver + CUDA Toolkit, sprawdź `nvidia-smi`, zweryfikuj że pakiet `Whisper.net.Runtime.Cuda` / `Whisper.net.Runtime.Cuda12` znalazł odpowiednią natywkę pod `bin/.../runtimes/linux-x64/native`. |
+| `ggml-cuda.cu:96: CUDA error` + brak nowego raportu | Wiszący proces po crashu zajmuje VRAM albo `GpuConcurrency` za duże na kartę | `pkill -f WhisperBenchmark`, sprawdź `nvidia-smi` (wolna pamięć), uruchom z `--gpu-concurrency 1`. |
+| Stary `benchmark-summary.json` (brak `"mode": "dataset"`) | Ostatni run się wywalił przed `Raport zapisany` | Napraw CUDA / zwolnij GPU i uruchom `dataset` ponownie. |
+
+### CUDA / pamięć GPU (ważne na laptopie)
+
+Przed `dataset` / `soak`:
+
+```bash
+nvidia-smi
+pkill -f WhisperBenchmark   # jeśli po Ctrl+C lub crashu coś zostało na GPU
+```
+
+Aplikacja przy starcie `dataset` loguje ostrzeżenie (`GpuStartupCheck`), gdy wykryje proces WhisperBenchmark już trzymający pamięć GPU.
+
+**RTX 3050 4 GB:** model `large-v3-turbo` (~1,5 GB) + beam search — zostaw `GpuConcurrency=1`. Nie uruchamiaj kilku benchmarków równolegle.
+
+Pełna instalacja Ubuntu (sterownik, CUDA, .NET, ffmpeg): patrz **`PreKonfiguracja-Ubuntu-24.04-LTS.md`**.
 
 ---
 
@@ -430,4 +536,4 @@ Invoke-WebRequest `
 - Brak diarizacji.
 - Brak konwersji formatów (ffmpeg) – wymagane WAV mono 16 kHz PCM-16 na wejściu.
 - Brak RabbitMQ, OpenSSL, uploadów, scalania finalnego JSON-a.
-- Jeden proces, jeden model w pamięci, N workerów / processorów (każdy z osobnym `WhisperProcessor`, ale współdzielonym `WhisperFactory`).
+- Jeden proces; `GpuConcurrency` niezależnych instancji modelu w VRAM; N workerów z osobnym `WhisperProcessor` na transkrypcję.

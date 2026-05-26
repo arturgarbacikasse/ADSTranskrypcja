@@ -2,19 +2,14 @@ using System.Globalization;
 
 namespace WhisperBenchmark.Cli;
 
-/// <summary>
-/// Tryb pracy aplikacji.
-/// </summary>
 public enum BenchmarkMode
 {
     Single,
     Soak,
-    Sweep
+    Sweep,
+    Dataset
 }
 
-/// <summary>
-/// Sparsowane opcje z linii poleceń. Wszystko jest opcjonalne – brakujące pola pochodzą z appsettings.json.
-/// </summary>
 public sealed class CliOptions
 {
     public BenchmarkMode Mode { get; init; }
@@ -26,13 +21,15 @@ public sealed class CliOptions
     public int? MaxFiles { get; init; }
     public IReadOnlyList<int>? ConcurrencySweep { get; init; }
     public bool? WriteTranscriptionJson { get; init; }
+    public bool? CollectGpuMetrics { get; init; }
+    public bool? Shuffle { get; init; }
 
     public static CliOptions Parse(string[] args)
     {
         if (args.Length == 0)
         {
             throw new ArgumentException(
-                "Brakuje trybu pracy. Użyj: WhisperBenchmark <single|soak|sweep> [opcje].");
+                "Brakuje trybu pracy. Użyj: WhisperBenchmark <single|soak|sweep|dataset> [opcje].");
         }
 
         var modeArg = args[0].ToLowerInvariant();
@@ -47,8 +44,9 @@ public sealed class CliOptions
             "single" => BenchmarkMode.Single,
             "soak" => BenchmarkMode.Soak,
             "sweep" => BenchmarkMode.Sweep,
+            "dataset" => BenchmarkMode.Dataset,
             _ => throw new ArgumentException(
-                $"Nieznany tryb '{args[0]}'. Dostępne: single | soak | sweep.")
+                $"Nieznany tryb '{args[0]}'. Dostępne: single | soak | sweep | dataset.")
         };
 
         string? file = null;
@@ -59,6 +57,8 @@ public sealed class CliOptions
         int? maxFiles = null;
         IReadOnlyList<int>? sweep = null;
         bool? writeTranscription = null;
+        bool? collectGpu = null;
+        bool? shuffle = null;
 
         for (int i = 1; i < args.Length; i++)
         {
@@ -106,6 +106,12 @@ public sealed class CliOptions
                 case "--write-transcription-json":
                     writeTranscription = ParseBool(GetValue()!);
                     break;
+                case "--collect-gpu-metrics":
+                    collectGpu = ParseBool(GetValue()!);
+                    break;
+                case "--shuffle":
+                    shuffle = ParseBool(GetValue()!);
+                    break;
                 case "--help":
                 case "-h":
                     PrintHelp();
@@ -114,11 +120,6 @@ public sealed class CliOptions
                 default:
                     throw new ArgumentException($"Nieznany parametr: {key}");
             }
-        }
-
-        if (mode == BenchmarkMode.Single && string.IsNullOrWhiteSpace(file))
-        {
-            throw new ArgumentException("Tryb 'single' wymaga parametru --file <ścieżka do WAV>.");
         }
 
         if (mode == BenchmarkMode.Sweep && (sweep is null || sweep.Count == 0))
@@ -136,7 +137,9 @@ public sealed class CliOptions
             GpuConcurrency = gpu,
             MaxFiles = maxFiles,
             ConcurrencySweep = sweep,
-            WriteTranscriptionJson = writeTranscription
+            WriteTranscriptionJson = writeTranscription,
+            CollectGpuMetrics = collectGpu,
+            Shuffle = shuffle
         };
     }
 
@@ -147,22 +150,27 @@ public sealed class CliOptions
         Console.WriteLine();
         Console.WriteLine("Tryby pracy:");
         Console.WriteLine("  single  – transkrybuje pojedynczy plik WAV i drukuje wynik.");
-        Console.WriteLine("  soak    – godzinny+ test obciążeniowy dla jednej wartości GpuConcurrency.");
-        Console.WriteLine("  sweep   – test wielu wartości GpuConcurrency (np. 1,2,4,8) w jednej sesji.");
+        Console.WriteLine("  soak    – test obciążeniowy przez zadany czas (DurationMinutes).");
+        Console.WriteLine("  sweep   – porównanie wielu wartości GpuConcurrency.");
+        Console.WriteLine("  dataset – przetwarza cały InputDirectory dokładnie raz (rekomendowany POC).");
         Console.WriteLine();
         Console.WriteLine("Wspólne opcje:");
-        Console.WriteLine("  --input <dir>                   katalog z plikami WAV (override appsettings)");
-        Console.WriteLine("  --output <dir>                  katalog raportów (override appsettings)");
-        Console.WriteLine("  --duration-minutes <int>        długość fazy pomiarowej");
-        Console.WriteLine("  --gpu-concurrency <int>         równoległość transkrypcji na GPU");
-        Console.WriteLine("  --concurrency 1,2,4,8           lista concurrencies dla trybu sweep");
-        Console.WriteLine("  --max-files <int>               twardy limit liczby plików");
-        Console.WriteLine("  --write-transcription-json true zapis pełnej transkrypcji per plik");
+        Console.WriteLine("  --file <path>                     plik WAV (tryb single)");
+        Console.WriteLine("  --input <dir>                     katalog główny: {interactionId}/*.wav");
+        Console.WriteLine("  --output <dir>                    katalog raportów");
+        Console.WriteLine("  --duration-minutes <int>          długość fazy pomiarowej (soak/sweep; ignorowane w dataset)");
+        Console.WriteLine("  --gpu-concurrency <int>           równoległość transkrypcji na GPU");
+        Console.WriteLine("  --concurrency 1,2,4,8             lista concurrencies dla trybu sweep");
+        Console.WriteLine("  --max-files <int>                 twardy limit liczby plików");
+        Console.WriteLine("  --write-transcription-json true   zapis pełnej transkrypcji per plik");
+        Console.WriteLine("  --collect-gpu-metrics true/false  zbieranie nvidia-smi (domyślnie z appsettings)");
+        Console.WriteLine("  --shuffle true/false              losowa kolejność plików (dataset/soak)");
         Console.WriteLine();
         Console.WriteLine("Przykłady:");
-        Console.WriteLine("  WhisperBenchmark single --file /data/input/call001_1.wav");
-        Console.WriteLine("  WhisperBenchmark soak --input /data/input --output /data/output --duration-minutes 60 --gpu-concurrency 4");
-        Console.WriteLine("  WhisperBenchmark sweep --input /data/input --output /data/output --duration-minutes 10 --concurrency 1,2,4,8,16");
+        Console.WriteLine("  WhisperBenchmark single --file ./Data/Input/100/100_1.wav");
+        Console.WriteLine("  WhisperBenchmark soak --input ./Data/Input --output ./Data/Output --duration-minutes 60 --gpu-concurrency 4");
+        Console.WriteLine("  WhisperBenchmark dataset --input ./Data/Input --output ./Data/Output --gpu-concurrency 4");
+        Console.WriteLine("  WhisperBenchmark sweep --input ./Data/Input --output ./Data/Output --duration-minutes 10 --concurrency 1,2,4,8,16");
         Console.WriteLine();
     }
 

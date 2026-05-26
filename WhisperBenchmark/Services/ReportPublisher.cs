@@ -40,9 +40,13 @@ public sealed class ReportPublisher
         await CsvReportWriter.WriteCallsAsync(callsCsv, result.Calls, cancellationToken).ConfigureAwait(false);
         await JsonReportWriter.WriteErrorsAsync(errorsJson, result.Errors, cancellationToken).ConfigureAwait(false);
 
-        if (gpuSamples is { Count: > 0 })
+        if (!string.IsNullOrEmpty(gpuCsvHeader))
         {
-            await CsvReportWriter.WriteGpuSamplesAsync(gpuCsv, gpuCsvHeader, gpuSamples, cancellationToken)
+            await CsvReportWriter.WriteGpuSamplesAsync(
+                    gpuCsv,
+                    gpuCsvHeader,
+                    gpuSamples ?? Array.Empty<string>(),
+                    cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -64,6 +68,14 @@ public sealed class ReportPublisher
 
         _logger.LogInformation("Raport zapisany w {Dir}.", outDir);
     }
+
+    public Task PublishDatasetAsync(
+        BenchmarkSettings benchmark,
+        BenchmarkRunner.BenchmarkExecutionResult result,
+        IReadOnlyList<string>? gpuSamples,
+        string gpuCsvHeader,
+        CancellationToken cancellationToken) =>
+        PublishSoakAsync(benchmark, result, gpuSamples, gpuCsvHeader, cancellationToken);
 
     public async Task PublishSweepAsync(
         BenchmarkSettings baseBenchmark,
@@ -173,8 +185,10 @@ public sealed class ReportPublisher
 
     private static BenchmarkSettings CloneSettings(BenchmarkSettings src) => new()
     {
+        DefaultMode = src.DefaultMode,
         InputDirectory = src.InputDirectory,
         OutputDirectory = src.OutputDirectory,
+        SingleSampleFile = src.SingleSampleFile,
         Pattern = src.Pattern,
         FileNameRegex = src.FileNameRegex,
         DurationMinutes = src.DurationMinutes,

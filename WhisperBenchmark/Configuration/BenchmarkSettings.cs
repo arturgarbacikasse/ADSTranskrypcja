@@ -6,12 +6,23 @@ namespace WhisperBenchmark.Configuration;
 /// </summary>
 public sealed class BenchmarkSettings
 {
+    /// <summary>Domyślny tryb CLI, gdy aplikacja uruchamiana bez argumentów (informacyjnie).</summary>
+    public string DefaultMode { get; set; } = "dataset";
+
     public string InputDirectory { get; set; } = "./Data/Input";
     public string OutputDirectory { get; set; } = "./Data/Output";
+
+    /// <summary>
+    /// Domyślny plik WAV dla trybu <c>single</c>, gdy nie podano <c>--file</c>.
+    /// Ścieżka względna do katalogu projektu, np. ./Data/Input/100/100_1.wav.
+    /// </summary>
+    public string? SingleSampleFile { get; set; } = "./Data/Input/100/100_1.wav";
+
     public string Pattern { get; set; } = "*.wav";
 
     /// <summary>
-    /// Wzorzec nazewnictwa plików. Domyślnie {callId}_{participantId}.wav.
+    /// Wzorzec nazewnictwa plików w podkatalogu interactionId.
+    /// Domyślnie {interactionId}_{participantId}.wav (grupa regex: callId).
     /// </summary>
     public string FileNameRegex { get; set; } = @"^(?<callId>.+)_(?<participantId>\d+)\.wav$";
 

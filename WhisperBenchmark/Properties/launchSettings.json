@@ -1,8 +1,8 @@
 {
   "profiles": {
-    "help": {
+    "dataset (full input, GPU=1)": {
       "commandName": "Project",
-      "commandLineArgs": "--help",
+      "commandLineArgs": "dataset --input ./Data/Input --output ./Data/Output --gpu-concurrency 1",
       "workingDirectory": "$(ProjectDir)",
       "environmentVariables": {
         "DOTNET_ENVIRONMENT": "Development"
@@ -11,7 +11,7 @@
 
     "single (sample WAV)": {
       "commandName": "Project",
-      "commandLineArgs": "single --file ./Data/Input/call001_1.wav --output ./Data/Output",
+      "commandLineArgs": "single --file ./Data/Input/100/100_1.wav --output ./Data/Output",
       "workingDirectory": "$(ProjectDir)",
       "environmentVariables": {
         "DOTNET_ENVIRONMENT": "Development"
@@ -51,6 +51,15 @@
       "workingDirectory": "$(ProjectDir)",
       "environmentVariables": {
         "DOTNET_ENVIRONMENT": "Production"
+      }
+    },
+
+    "help": {
+      "commandName": "Project",
+      "commandLineArgs": "--help",
+      "workingDirectory": "$(ProjectDir)",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
       }
     }
   }

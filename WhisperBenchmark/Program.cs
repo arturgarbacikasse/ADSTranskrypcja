@@ -88,6 +88,7 @@ public static class Program
                 BenchmarkMode.Single => await RunSingleAsync(host, benchmarkSettings, transcriptionSettings, cli, cts.Token),
                 BenchmarkMode.Soak => await RunSoakAsync(host, benchmarkSettings, transcriptionSettings, cts.Token),
                 BenchmarkMode.Sweep => await RunSweepAsync(host, benchmarkSettings, transcriptionSettings, cli, cts.Token),
+                BenchmarkMode.Dataset => await RunDatasetAsync(host, benchmarkSettings, transcriptionSettings, cts.Token),
                 _ => 1
             };
         }
@@ -119,7 +120,14 @@ public static class Program
         var runner = host.Services.GetRequiredService<BenchmarkRunner>();
         var publisher = host.Services.GetRequiredService<ReportPublisher>();
 
-        var file = cli.File!;
+        var file = cli.File ?? benchmark.SingleSampleFile;
+        if (string.IsNullOrWhiteSpace(file))
+        {
+            throw new ArgumentException(
+                "Tryb 'single' wymaga --file <ścieżka> lub ustawienia Benchmark.SingleSampleFile w appsettings.json " +
+                "(np. ./Data/Input/100/100_1.wav).");
+        }
+
         logger.LogInformation("Tryb SINGLE – plik {File}.", file);
 
         var result = await runner.RunSingleAsync(file, benchmark, transcription, token).ConfigureAwait(false);
@@ -191,9 +199,55 @@ public static class Program
         await gpu.DisposeAsync().ConfigureAwait(false);
         var samples = gpu.SnapshotSamples();
 
-        await publisher.PublishSoakAsync(benchmark, execution, samples, gpu.CsvHeader, token).ConfigureAwait(false);
+        await publisher.PublishSoakAsync(benchmark, execution, samples,
+            benchmark.CollectGpuMetrics ? gpu.CsvHeader : string.Empty, token).ConfigureAwait(false);
 
         PrintSummary(logger, execution.Summary);
+        return 0;
+    }
+
+    private static async Task<int> RunDatasetAsync(
+        IHost host,
+        BenchmarkSettings benchmark,
+        TranscriptionSettings transcription,
+        CancellationToken token)
+    {
+        var logger = host.Services.GetRequiredService<ILogger<HostMarker>>();
+        var runner = host.Services.GetRequiredService<BenchmarkRunner>();
+        var publisher = host.Services.GetRequiredService<ReportPublisher>();
+
+        logger.LogInformation(
+            "Tryb DATASET – input={Input}, output={Output}, concurrency={C}, shuffle={Shuffle}.",
+            benchmark.InputDirectory, benchmark.OutputDirectory,
+            benchmark.GpuConcurrency, benchmark.ShuffleInput);
+
+        GpuStartupCheck.WarnIfGpuLooksBusy(logger, transcription.UseGpu);
+
+        IReadOnlyList<string> samples = Array.Empty<string>();
+        var gpuHeader = string.Empty;
+
+        if (benchmark.CollectGpuMetrics)
+        {
+            var gpuLogger = host.Services.GetRequiredService<ILogger<GpuMetricsCollector>>();
+            await using var gpu = new GpuMetricsCollector(benchmark, gpuLogger);
+            gpu.Start();
+
+            var execution = await runner.RunDatasetAsync(benchmark, transcription, token).ConfigureAwait(false);
+
+            await gpu.DisposeAsync().ConfigureAwait(false);
+            samples = gpu.SnapshotSamples();
+            gpuHeader = gpu.CsvHeader;
+
+            await publisher.PublishDatasetAsync(benchmark, execution, samples, gpuHeader, token)
+                .ConfigureAwait(false);
+
+            PrintDatasetSummary(execution.Summary, benchmark.OutputDirectory);
+            return 0;
+        }
+
+        var result = await runner.RunDatasetAsync(benchmark, transcription, token).ConfigureAwait(false);
+        await publisher.PublishDatasetAsync(benchmark, result, samples, gpuHeader, token).ConfigureAwait(false);
+        PrintDatasetSummary(result.Summary, benchmark.OutputDirectory);
         return 0;
     }
 
@@ -239,14 +293,53 @@ public static class Program
             s.FilesPerHour, s.CallsPerHour, s.AvgFileProcessingSeconds, s.P95FileProcessingSeconds, s.Errors);
     }
 
+    private static void PrintDatasetSummary(Domain.BenchmarkSummary s, string outputDirectory)
+    {
+        var cap = s.CapacityPrediction;
+        Console.WriteLine();
+        Console.WriteLine("DATASET BENCHMARK FINISHED");
+        Console.WriteLine($"Input: {s.InputDirectory}");
+        Console.WriteLine($"Model: {s.Model}");
+        Console.WriteLine($"GPU concurrency: {s.GpuConcurrency}");
+        Console.WriteLine();
+        Console.WriteLine($"Interactions: {s.ProcessedInteractions} processed, {s.FailedInteractions} failed");
+        Console.WriteLine($"Files: {s.ProcessedFiles} processed, {s.FailedFiles} failed");
+        Console.WriteLine($"Audio: {s.DatasetAudioHours:F2} h");
+        Console.WriteLine($"Wall-clock: {s.WallClockMinutes:F2} min");
+        Console.WriteLine($"RTF: {s.Rtf:F2}x");
+        Console.WriteLine($"Capacity: {s.AudioHoursPerHour:F2} h audio / h");
+        if (cap is not null)
+        {
+            Console.WriteLine($"Estimated 8h audio processing time: {cap.ProcessingTimeFor8AudioHoursMinutes:F2} min");
+            Console.WriteLine($"Estimated 24h audio processing time: {cap.ProcessingTimeFor24AudioHoursMinutes:F2} min");
+            Console.WriteLine($"Estimated 100h audio processing time: {cap.ProcessingTimeFor100AudioHoursMinutes:F2} min");
+        }
+        Console.WriteLine();
+        Console.WriteLine("Output:");
+        Console.WriteLine($"  {Path.Combine(outputDirectory, "benchmark-summary.json")}");
+        Console.WriteLine($"  {Path.Combine(outputDirectory, "benchmark-files.csv")}");
+        Console.WriteLine($"  {Path.Combine(outputDirectory, "benchmark-calls.csv")}");
+        Console.WriteLine($"  {Path.Combine(outputDirectory, "errors.json")}");
+        Console.WriteLine();
+    }
+
     private static BenchmarkSettings ApplyCliOverrides(BenchmarkSettings src, CliOptions cli)
     {
         if (!string.IsNullOrWhiteSpace(cli.Input)) src.InputDirectory = cli.Input!;
         if (!string.IsNullOrWhiteSpace(cli.Output)) src.OutputDirectory = cli.Output!;
-        if (cli.DurationMinutes is int d && d > 0) src.DurationMinutes = d;
+        if (cli.DurationMinutes is int d && d > 0 && cli.Mode != BenchmarkMode.Dataset) src.DurationMinutes = d;
         if (cli.GpuConcurrency is int c && c > 0) src.GpuConcurrency = c;
         if (cli.MaxFiles is int m && m > 0) src.MaxFiles = m;
         if (cli.WriteTranscriptionJson is bool w) src.WriteTranscriptionJson = w;
+        if (cli.CollectGpuMetrics is bool g) src.CollectGpuMetrics = g;
+        if (cli.Shuffle is bool sh) src.ShuffleInput = sh;
+
+        if (cli.Mode == BenchmarkMode.Dataset)
+        {
+            src.WarmupFiles = 0;
+            src.RepeatInputUntilDurationEnds = false;
+        }
+
         return src;
     }
 

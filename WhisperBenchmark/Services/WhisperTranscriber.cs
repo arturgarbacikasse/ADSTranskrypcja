@@ -9,18 +9,17 @@ using WhisperBenchmark.Domain;
 namespace WhisperBenchmark.Services;
 
 /// <summary>
-/// Otacza Whisper.net w prostą fasadę: ładuje model raz (przy starcie aplikacji)
-/// i udostępnia <see cref="TranscribeAsync"/> dla pojedynczego pliku.
-/// Sam factory trzyma jeden, współdzielony native context modelu;
-/// per transkrypcję tworzony jest świeży <see cref="WhisperProcessor"/> żeby uniknąć
-/// problemów ze stanem rezydualnym między plikami.
+/// Otacza Whisper.net: ładuje <paramref name="parallelSlots"/> kopii modelu (po jednej na slot GPU),
+/// żeby równoległe transkrypcje nie współdzieliły jednego native context (unika crashy CUDA).
 /// </summary>
 public sealed class WhisperTranscriber : IAsyncDisposable, IDisposable
 {
     private readonly ILogger<WhisperTranscriber> _logger;
     private readonly TranscriptionSettings _settings;
     private readonly WhisperModelDownloader _modelDownloader;
-    private WhisperFactory? _factory;
+    private WhisperFactory[]? _factories;
+    private SemaphoreSlim? _concurrencyLimit;
+    private int _roundRobin;
     private bool _disposed;
 
     public string Model => _settings.ModelFileName;
@@ -28,6 +27,7 @@ public sealed class WhisperTranscriber : IAsyncDisposable, IDisposable
     public bool UseGpu => _settings.UseGpu;
     public int GpuDevice => _settings.GpuDevice;
     public string LoadedRuntime { get; private set; } = "Unknown";
+    public int LoadedFactoryCount { get; private set; }
 
     public WhisperTranscriber(
         TranscriptionSettings settings,
@@ -39,17 +39,20 @@ public sealed class WhisperTranscriber : IAsyncDisposable, IDisposable
         _logger = logger;
     }
 
+    public Task InitializeAsync(CancellationToken cancellationToken = default) =>
+        InitializeAsync(parallelSlots: 1, cancellationToken);
+
     /// <summary>
-    /// Konfiguruje preferencje runtime'u, w razie potrzeby pobiera model z Hugging Face
-    /// i ładuje go do pamięci. Musi być wywołane raz, przed pierwszą transkrypcją.
+    /// Ładuje <paramref name="parallelSlots"/> niezależnych instancji modelu (zwykle = GpuConcurrency).
     /// </summary>
-    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    public async Task InitializeAsync(int parallelSlots, CancellationToken cancellationToken = default)
     {
-        if (_factory is not null)
+        if (_factories is not null)
         {
             return;
         }
 
+        parallelSlots = Math.Max(1, parallelSlots);
         ConfigureRuntime();
 
         var modelPath = Path.Combine(_settings.ModelsDirectory, _settings.ModelFileName);
@@ -71,15 +74,29 @@ public sealed class WhisperTranscriber : IAsyncDisposable, IDisposable
         options.UseGpu = _settings.UseGpu;
         options.GpuDevice = _settings.GpuDevice;
 
-        var sw = Stopwatch.StartNew();
-        _factory = WhisperFactory.FromPath(modelPath, options);
-        sw.Stop();
+        _factories = new WhisperFactory[parallelSlots];
+        _concurrencyLimit = new SemaphoreSlim(parallelSlots, parallelSlots);
 
+        var totalSw = Stopwatch.StartNew();
+        for (var i = 0; i < parallelSlots; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var sw = Stopwatch.StartNew();
+            _factories[i] = WhisperFactory.FromPath(modelPath, options);
+            sw.Stop();
+            _logger.LogInformation(
+                "Załadowano instancję modelu {Index}/{Total} w {Elapsed} ms.",
+                i + 1, parallelSlots, sw.ElapsedMilliseconds);
+        }
+        totalSw.Stop();
+
+        LoadedFactoryCount = parallelSlots;
         LoadedRuntime = RuntimeOptions.LoadedLibrary?.ToString() ?? "Unknown";
 
         _logger.LogInformation(
-            "Załadowano model Whispera {Model} z {Path} w {Elapsed} ms (runtime: {Runtime}, useGpu={UseGpu}, gpuDevice={Device}).",
-            _settings.ModelFileName, modelPath, sw.ElapsedMilliseconds, LoadedRuntime, _settings.UseGpu, _settings.GpuDevice);
+            "Gotowe: {Slots} instancji modelu {Model} (łącznie {Total} ms, runtime: {Runtime}, useGpu={UseGpu}, gpuDevice={Device}).",
+            parallelSlots, _settings.ModelFileName, totalSw.ElapsedMilliseconds, LoadedRuntime, _settings.UseGpu,
+            _settings.GpuDevice);
 
         if (_settings.UseGpu &&
             LoadedRuntime is not "Cuda" and not "Cuda12" and not "Vulkan" and not "CoreML" and not "OpenVino")
@@ -91,43 +108,50 @@ public sealed class WhisperTranscriber : IAsyncDisposable, IDisposable
         }
     }
 
-    /// <summary>
-    /// Wykonuje pełną transkrypcję pojedynczego pliku WAV.
-    /// </summary>
     public async Task<TranscriptionResult> TranscribeAsync(string audioFilePath, CancellationToken cancellationToken)
     {
-        if (_factory is null)
+        if (_factories is null || _concurrencyLimit is null)
         {
-            throw new InvalidOperationException("Transcriber nie został zainicjalizowany. Wywołaj Initialize().");
+            throw new InvalidOperationException("Transcriber nie został zainicjalizowany. Wywołaj InitializeAsync().");
         }
 
-        using var processor = BuildProcessor();
-
-        await using var fs = new FileStream(
-            audioFilePath, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: 64 * 1024, useAsync: true);
-
-        var segments = new List<TranscriptionSegment>(capacity: 64);
-        var sw = Stopwatch.StartNew();
-
-        await foreach (var seg in processor.ProcessAsync(fs, cancellationToken).ConfigureAwait(false))
+        await _concurrencyLimit.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            segments.Add(new TranscriptionSegment
+            var idx = Interlocked.Increment(ref _roundRobin);
+            var factory = _factories[(idx - 1) % _factories.Length];
+
+            using var processor = BuildProcessor(factory);
+
+            await using var fs = new FileStream(
+                audioFilePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 64 * 1024, useAsync: true);
+
+            var segments = new List<TranscriptionSegment>(capacity: 64);
+            var sw = Stopwatch.StartNew();
+
+            await foreach (var seg in processor.ProcessAsync(fs, cancellationToken).ConfigureAwait(false))
             {
-                Start = seg.Start,
-                End = seg.End,
-                Text = seg.Text ?? string.Empty
-            });
+                segments.Add(new TranscriptionSegment
+                {
+                    Start = seg.Start,
+                    End = seg.End,
+                    Text = seg.Text ?? string.Empty
+                });
+            }
+
+            sw.Stop();
+            return new TranscriptionResult(segments, sw.Elapsed);
         }
-
-        sw.Stop();
-
-        return new TranscriptionResult(segments, sw.Elapsed);
+        finally
+        {
+            _concurrencyLimit.Release();
+        }
     }
 
-    private WhisperProcessor BuildProcessor()
+    private WhisperProcessor BuildProcessor(WhisperFactory factory)
     {
-        var builder = _factory!.CreateBuilder()
+        var builder = factory.CreateBuilder()
             .WithThreads(_settings.Threads)
             .WithNoContext();
 
@@ -209,8 +233,17 @@ public sealed class WhisperTranscriber : IAsyncDisposable, IDisposable
     public void Dispose()
     {
         if (_disposed) return;
-        _factory?.Dispose();
-        _factory = null;
+        if (_factories is not null)
+        {
+            foreach (var f in _factories)
+            {
+                f.Dispose();
+            }
+        }
+
+        _factories = null;
+        _concurrencyLimit?.Dispose();
+        _concurrencyLimit = null;
         _disposed = true;
         GC.SuppressFinalize(this);
     }

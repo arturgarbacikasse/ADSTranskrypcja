@@ -40,8 +40,9 @@ public sealed class BenchmarkRunner
     {
         var aggregator = new MetricsAggregator();
 
-        var (validFiles, scanErrors) = _inputScanner.Scan(benchmark);
-        foreach (var err in scanErrors)
+        var scan = _inputScanner.Scan(benchmark);
+        var validFiles = scan.Valid;
+        foreach (var err in scan.Errors)
         {
             aggregator.Add(err);
         }
@@ -53,10 +54,10 @@ public sealed class BenchmarkRunner
 
             aggregator.MarkStarted();
             aggregator.MarkFinished();
-            return BuildResult(aggregator, benchmark, transcription, discovered: 0);
+            return BuildSoakResult(aggregator, benchmark, transcription, discovered: 0);
         }
 
-        await _transcriber.InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await _transcriber.InitializeAsync(benchmark.GpuConcurrency, cancellationToken).ConfigureAwait(false);
 
         var queue = PrepareInitialQueue(validFiles, benchmark);
 
@@ -75,7 +76,65 @@ public sealed class BenchmarkRunner
         await RunMeasuredAsync(queue, aggregator, benchmark, cancellationToken).ConfigureAwait(false);
 
         aggregator.MarkFinished();
-        return BuildResult(aggregator, benchmark, transcription, discovered: validFiles.Count);
+        return BuildSoakResult(aggregator, benchmark, transcription, discovered: validFiles.Count);
+    }
+
+    /// <summary>
+    /// Tryb dataset: przetwarza cały InputDirectory dokładnie raz, bez limitu czasu i bez zapętlania.
+    /// </summary>
+    public async Task<BenchmarkExecutionResult> RunDatasetAsync(
+        BenchmarkSettings benchmark,
+        TranscriptionSettings transcription,
+        CancellationToken cancellationToken)
+    {
+        var aggregator = new MetricsAggregator();
+
+        var scan = _inputScanner.Scan(benchmark);
+        foreach (var err in scan.Errors)
+        {
+            aggregator.Add(err);
+        }
+
+        var validFiles = scan.Valid;
+        var discovery = new DatasetDiscoveryContext(
+            scan.InteractionsDiscovered,
+            scan.FilesDiscovered,
+            scan.FilesPerInteractionDiscovered);
+
+        if (validFiles.Count == 0)
+        {
+            _logger.LogError("Brak poprawnych plików WAV w {Dir}. Benchmark dataset zakończony bez pomiaru.",
+                benchmark.InputDirectory);
+
+            aggregator.MarkStarted();
+            aggregator.MarkFinished();
+            return BuildDatasetResult(aggregator, benchmark, transcription, discovery);
+        }
+
+        await _transcriber.InitializeAsync(benchmark.GpuConcurrency, cancellationToken).ConfigureAwait(false);
+
+        var queue = PrepareInitialQueue(validFiles, benchmark);
+
+        aggregator.MarkStarted();
+        _logger.LogInformation(
+            "Start trybu DATASET: interactions={Interactions}, files={Files}, gpuConcurrency={Concurrency}, shuffle={Shuffle}.",
+            discovery.InteractionsDiscovered, queue.Count, benchmark.GpuConcurrency, benchmark.ShuffleInput);
+
+        try
+        {
+            await RunDatasetMeasuredAsync(queue, aggregator, benchmark, discovery, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("Tryb DATASET przerwany – zapiszę raport częściowy z dotychczasowych wyników.");
+        }
+        finally
+        {
+            aggregator.MarkFinished();
+        }
+
+        return BuildDatasetResult(aggregator, benchmark, transcription, discovery);
     }
 
     /// <summary>
@@ -89,11 +148,14 @@ public sealed class BenchmarkRunner
     {
         if (!File.Exists(filePath))
         {
-            throw new FileNotFoundException($"Plik wejściowy nie istnieje: {filePath}", filePath);
+            var hint = InputPathHints.ForMissingSingleFile(filePath, benchmark.InputDirectory);
+            throw new FileNotFoundException(
+                $"Plik wejściowy nie istnieje: {filePath}.{hint}",
+                filePath);
         }
 
         var fileName = Path.GetFileName(filePath);
-        var (callId, participantId) = ParseCallParticipant(benchmark, fileName);
+        var (callId, participantId) = ParseCallParticipant(benchmark, filePath, fileName);
         var info = AudioMetadataReader.Read(filePath, callId, participantId);
         if (!info.IsValid)
         {
@@ -101,13 +163,16 @@ public sealed class BenchmarkRunner
                 $"Plik nie spełnia wymagań (mono/16 kHz/PCM16): {info.ValidationError}");
         }
 
-        await _transcriber.InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await _transcriber.InitializeAsync(1, cancellationToken).ConfigureAwait(false);
 
         var job = new AudioJob { File = info, Sequence = 0, IsWarmup = false };
         return await TranscribeAsync(job, captureSegments: true, cancellationToken).ConfigureAwait(false);
     }
 
-    private (string callId, string participantId) ParseCallParticipant(BenchmarkSettings benchmark, string fileName)
+    private (string callId, string participantId) ParseCallParticipant(
+        BenchmarkSettings benchmark,
+        string filePath,
+        string fileName)
     {
         var regex = new System.Text.RegularExpressions.Regex(benchmark.FileNameRegex,
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
@@ -118,7 +183,22 @@ public sealed class BenchmarkRunner
                 fileName, benchmark.FileNameRegex);
             return ("single", "0");
         }
-        return (match.Groups["callId"].Value, match.Groups["participantId"].Value);
+
+        var callId = match.Groups["callId"].Value;
+        var participantId = match.Groups["participantId"].Value;
+        var parentDir = Path.GetDirectoryName(filePath);
+        if (!string.IsNullOrEmpty(parentDir))
+        {
+            var folderInteractionId = Path.GetFileName(parentDir);
+            if (!string.Equals(callId, folderInteractionId, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "Prefiks w nazwie pliku ({CallId}) nie zgadza się z katalogiem nadrzędnym ({Folder}) – używam callId z nazwy pliku.",
+                    callId, folderInteractionId);
+            }
+        }
+
+        return (callId, participantId);
     }
 
     private static List<AudioFileInfo> PrepareInitialQueue(
@@ -175,6 +255,136 @@ public sealed class BenchmarkRunner
             }
         }
         _logger.LogInformation("Warmup zakończony.");
+    }
+
+    private async Task RunDatasetMeasuredAsync(
+        IReadOnlyList<AudioFileInfo> queue,
+        MetricsAggregator aggregator,
+        BenchmarkSettings benchmark,
+        DatasetDiscoveryContext discovery,
+        CancellationToken externalToken)
+    {
+        var capacity = Math.Max(4, benchmark.GpuConcurrency * 4);
+        var channel = Channel.CreateBounded<AudioJob>(new BoundedChannelOptions(capacity)
+        {
+            SingleReader = false,
+            SingleWriter = true,
+            FullMode = BoundedChannelFullMode.Wait
+        });
+
+        using var metricsCts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+
+        var producer = Task.Run(async () =>
+            await ProduceDatasetJobsAsync(channel, queue, aggregator, externalToken).ConfigureAwait(false));
+
+        var consumers = new Task[Math.Max(1, benchmark.GpuConcurrency)];
+        for (int i = 0; i < consumers.Length; i++)
+        {
+            consumers[i] = Task.Run(() => ConsumeAsync(channel, aggregator, benchmark, externalToken));
+        }
+
+        var metricsLogger = Task.Run(() =>
+            LogDatasetMetricsLoopAsync(aggregator, benchmark, discovery, metricsCts.Token));
+
+        try
+        {
+            await producer.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            channel.Writer.TryComplete();
+        }
+
+        try
+        {
+            await Task.WhenAll(consumers).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { }
+
+        metricsCts.Cancel();
+
+        try
+        {
+            await metricsLogger.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task ProduceDatasetJobsAsync(
+        Channel<AudioJob> channel,
+        IReadOnlyList<AudioFileInfo> queue,
+        MetricsAggregator aggregator,
+        CancellationToken stopToken)
+    {
+        long sequence = 0;
+        foreach (var file in queue)
+        {
+            stopToken.ThrowIfCancellationRequested();
+
+            var job = new AudioJob
+            {
+                File = file,
+                Sequence = sequence++,
+                IsWarmup = false
+            };
+
+            try
+            {
+                await channel.Writer.WriteAsync(job, stopToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            aggregator.SetQueueDepth(channel.Reader.Count);
+        }
+
+        _logger.LogInformation("Dataset: wszystkie {Count} jobów wrzucone do kolejki.", queue.Count);
+        channel.Writer.TryComplete();
+    }
+
+    private async Task LogDatasetMetricsLoopAsync(
+        MetricsAggregator aggregator,
+        BenchmarkSettings benchmark,
+        DatasetDiscoveryContext discovery,
+        CancellationToken stopToken)
+    {
+        var interval = TimeSpan.FromSeconds(Math.Max(1, benchmark.MetricsIntervalSeconds));
+        while (!stopToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(interval, stopToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            LogDatasetSnapshot(aggregator, discovery);
+        }
+
+        LogDatasetSnapshot(aggregator, discovery);
+    }
+
+    private void LogDatasetSnapshot(MetricsAggregator aggregator, DatasetDiscoveryContext discovery)
+    {
+        var snap = aggregator.Snapshot(DateTime.UtcNow, discovery.FilesDiscovered, discovery.InteractionsDiscovered);
+        _logger.LogInformation(
+            "[{Elapsed:hh\\:mm\\:ss}] mode=dataset files={ProcessedFiles}/{FilesDiscovered} interactions={ProcessedInteractions}/{InteractionsDiscovered} audio={Audio:F2}h elapsed={ElapsedMin:F0}m rtf={Rtf:F1}x active={Active} queue={Queue} errors={Errors}",
+            snap.Elapsed,
+            snap.ProcessedFiles,
+            snap.FilesDiscovered,
+            snap.ProcessedInteractions,
+            snap.InteractionsDiscovered,
+            snap.AudioHours,
+            snap.Elapsed.TotalMinutes,
+            snap.Rtf,
+            snap.Active,
+            snap.Queue,
+            snap.Errors);
     }
 
     private async Task RunMeasuredAsync(
@@ -418,7 +628,7 @@ public sealed class BenchmarkRunner
             "[{Elapsed:hh\\:mm\\:ss}] files={Files} calls={Calls} audio={Audio:F2}h rtf={Rtf:F1}x active={Active} queue={Queue} errors={Errors}",
             snap.Elapsed,
             snap.ProcessedFiles,
-            snap.ProcessedCalls,
+            snap.ProcessedInteractions,
             snap.AudioHours,
             snap.Rtf,
             snap.Active,
@@ -426,7 +636,7 @@ public sealed class BenchmarkRunner
             snap.Errors);
     }
 
-    private BenchmarkExecutionResult BuildResult(
+    private BenchmarkExecutionResult BuildSoakResult(
         MetricsAggregator aggregator,
         BenchmarkSettings benchmark,
         TranscriptionSettings transcription,
@@ -447,6 +657,35 @@ public sealed class BenchmarkRunner
             Calls: aggregator.AggregateCalls(),
             Errors: aggregator.SnapshotErrors());
     }
+
+    private BenchmarkExecutionResult BuildDatasetResult(
+        MetricsAggregator aggregator,
+        BenchmarkSettings benchmark,
+        TranscriptionSettings transcription,
+        DatasetDiscoveryContext discovery)
+    {
+        var summary = aggregator.BuildDatasetSummary(
+            inputDirectory: benchmark.InputDirectory,
+            interactionsDiscovered: discovery.InteractionsDiscovered,
+            filesDiscovered: discovery.FilesDiscovered,
+            expectedFilesPerInteraction: discovery.FilesPerInteractionDiscovered,
+            model: transcription.ModelFileName,
+            language: transcription.Language,
+            useGpu: transcription.UseGpu,
+            gpuDevice: transcription.GpuDevice,
+            gpuConcurrency: benchmark.GpuConcurrency);
+
+        return new BenchmarkExecutionResult(
+            Summary: summary,
+            Files: aggregator.SnapshotResults(),
+            Calls: aggregator.AggregateCalls(),
+            Errors: aggregator.SnapshotErrors());
+    }
+
+    public sealed record DatasetDiscoveryContext(
+        int InteractionsDiscovered,
+        int FilesDiscovered,
+        IReadOnlyDictionary<string, int> FilesPerInteractionDiscovered);
 
     public sealed record BenchmarkExecutionResult(
         BenchmarkSummary Summary,

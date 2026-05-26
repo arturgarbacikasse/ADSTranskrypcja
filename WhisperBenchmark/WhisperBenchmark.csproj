@@ -8,6 +8,8 @@
     <RootNamespace>WhisperBenchmark</RootNamespace>
     <AssemblyName>WhisperBenchmark</AssemblyName>
     <InvariantGlobalization>false</InvariantGlobalization>
+    <RunWorkingDirectory>$(MSBuildProjectDirectory)</RunWorkingDirectory>
+    <DefaultLaunchProfile>dataset (full input, GPU=1)</DefaultLaunchProfile>
   </PropertyGroup>
 
   <ItemGroup>
