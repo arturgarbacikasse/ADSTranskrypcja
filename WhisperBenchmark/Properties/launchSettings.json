@@ -1,0 +1,57 @@
+{
+  "profiles": {
+    "help": {
+      "commandName": "Project",
+      "commandLineArgs": "--help",
+      "workingDirectory": "$(ProjectDir)",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    },
+
+    "single (sample WAV)": {
+      "commandName": "Project",
+      "commandLineArgs": "single --file ./Data/Input/call001_1.wav --output ./Data/Output",
+      "workingDirectory": "$(ProjectDir)",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    },
+
+    "soak (2 min smoke test)": {
+      "commandName": "Project",
+      "commandLineArgs": "soak --input ./Data/Input --output ./Data/Output --duration-minutes 2 --gpu-concurrency 1",
+      "workingDirectory": "$(ProjectDir)",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    },
+
+    "soak (60 min POC, GPU=4)": {
+      "commandName": "Project",
+      "commandLineArgs": "soak --input ./Data/Input --output ./Data/Output --duration-minutes 60 --gpu-concurrency 4",
+      "workingDirectory": "$(ProjectDir)",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Production"
+      }
+    },
+
+    "soak (CPU fallback debug)": {
+      "commandName": "Project",
+      "commandLineArgs": "soak --input ./Data/Input --output ./Data/Output --duration-minutes 1 --gpu-concurrency 1 --max-files 3 --write-transcription-json true",
+      "workingDirectory": "$(ProjectDir)",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    },
+
+    "sweep (10 min, 1-2-4-8-16)": {
+      "commandName": "Project",
+      "commandLineArgs": "sweep --input ./Data/Input --output ./Data/Output --duration-minutes 10 --concurrency 1,2,4,8,16",
+      "workingDirectory": "$(ProjectDir)",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Production"
+      }
+    }
+  }
+}

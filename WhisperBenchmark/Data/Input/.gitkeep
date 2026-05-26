@@ -1,0 +1,5 @@
+# Wgraj tutaj pliki WAV mono / 16 kHz / PCM 16-bit.
+# Nazewnictwo: {callId}_{participantId}.wav
+# np. call001_1.wav, call001_2.wav, call002_1.wav
+#
+# Same WAV-y są w .gitignore i nie trafią do repo.

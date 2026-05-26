@@ -1,0 +1,177 @@
+# ----------------------------------------------------------------------
+# .NET / build artifacts
+# ----------------------------------------------------------------------
+[Bb]in/
+[Oo]bj/
+[Bb]uild/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+
+*.user
+*.rsuser
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Visual Studio / Rider / VS Code local state
+.vs/
+.idea/
+*.sln.iml
+
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# NuGet / test / coverage
+*.nupkg
+*.snupkg
+.nuget/
+TestResults/
+coverage/
+coverage.*
+*.coverage
+*.coveragexml
+
+# ----------------------------------------------------------------------
+# Local config / secrets
+# ----------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+appsettings.Development.json
+appsettings.Local.json
+appsettings.*.local.json
+secrets.json
+
+# ----------------------------------------------------------------------
+# WhisperBenchmark - dane wejściowe, wyjściowe i modele
+# ----------------------------------------------------------------------
+
+# Lokalne WAV-y / dane klienta
+Data/Input/*
+WhisperBenchmark/Data/Input/*
+!Data/Input/.gitkeep
+!WhisperBenchmark/Data/Input/.gitkeep
+
+# Wyniki benchmarków i transkrypcji
+Data/Output/*
+WhisperBenchmark/Data/Output/*
+!Data/Output/.gitkeep
+!WhisperBenchmark/Data/Output/.gitkeep
+
+# Modele Whisper / GGML / GGUF
+Models/*
+WhisperBenchmark/Models/*
+!Models/.gitkeep
+!WhisperBenchmark/Models/.gitkeep
+
+# Dodatkowe lokalne katalogi, gdyby były używane poza strukturą z README
+data/input/
+data/output/
+data/models/
+models/
+outputs/
+transcriptions/
+
+# ----------------------------------------------------------------------
+# Audio / video / modele - nigdy do repo
+# ----------------------------------------------------------------------
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.opus
+*.aac
+*.wma
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+
+*.bin
+*.gguf
+*.ggml
+*.onnx
+*.tflite
+
+# ----------------------------------------------------------------------
+# Pliki wynikowe benchmarku z README
+# ----------------------------------------------------------------------
+benchmark-summary.json
+benchmark-summary.csv
+benchmark-files.csv
+benchmark-calls.csv
+benchmark-sweep.csv
+gpu-metrics.csv
+errors.json
+
+**/benchmark-summary.json
+**/benchmark-summary.csv
+**/benchmark-files.csv
+**/benchmark-calls.csv
+**/benchmark-sweep.csv
+**/gpu-metrics.csv
+**/errors.json
+**/sweep-c*/
+**/files/
+**/transcriptions/
+
+# BenchmarkDotNet, gdyby doszedł później
+BenchmarkDotNet.Artifacts/
+*.benchmark.log
+*.benchmark.json
+*.benchmark.csv
+*.benchmark.md
+
+# ----------------------------------------------------------------------
+# Logs / temp
+# ----------------------------------------------------------------------
+*.log
+logs/
+Logs/
+
+tmp/
+temp/
+Temp/
+*.tmp
+*.bak
+*.swp
+
+# ----------------------------------------------------------------------
+# Local databases
+# ----------------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+*.mdf
+*.ldf
+
+# ----------------------------------------------------------------------
+# Publish artifacts
+# ----------------------------------------------------------------------
+publish/
+Publish/
+artifacts/
+Artifacts/
+
+# ----------------------------------------------------------------------
+# Docker local overrides
+# ----------------------------------------------------------------------
+docker-compose.override.yml
+.docker/
+
+# ----------------------------------------------------------------------
+# OS noise
+# ----------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
