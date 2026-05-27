@@ -484,29 +484,247 @@ Dla RTX 3050 Ti 4 GB nie zaczynać od dużych wartości. Najpierw testować `1`,
 
 ---
 
-## 17. Monitoring GPU
+## 17. Wybór modelu i `--gpu-concurrency` pod dostępny VRAM
 
-W drugim terminalu:
+`WhisperBenchmark` w trybie `dataset` / `soak` ładuje **niezależną kopię modelu w VRAM dla każdego slotu `--gpu-concurrency`** (świadomy wybór – każdy worker ma własny `whisper_context`, inaczej CUDA crashuje przy współbieżnym dostępie). Czyli realne zużycie VRAM to:
 
-```bash
-watch -n 1 nvidia-smi
+```text
+VRAM ≈ slots * (rozmiar_modelu + KV_cache_per_slot + bufory_aktywacji)
 ```
 
-Albo:
+Dla `BeamSize=5` (domyślne `appsettings.json`) `KV_cache + bufory` per slot to zwykle 0.3–0.7 GB (im dłuższe audio, tym więcej).
+
+### Estymata per slot (BeamSize=5)
+
+| Model | Wagi w VRAM | + KV/aktywacje (per slot) | Razem per slot |
+|---|---|---|---|
+| `ggml-large-v3-turbo.bin` (FP16) | ~1.6 GB | ~0.4–0.7 GB | **~2.0–2.3 GB** |
+| `ggml-large-v3.bin` (FP16) | ~3.1 GB | ~0.5–0.8 GB | **~3.6–3.9 GB** |
+| `ggml-medium.bin` (FP16) | ~1.5 GB | ~0.3–0.5 GB | **~1.8–2.0 GB** |
+| `ggml-medium-q5_0.bin` | ~0.5 GB | ~0.3–0.5 GB | **~0.8–1.0 GB** |
+| `ggml-large-v3-turbo-q5_0.bin` | ~0.6 GB | ~0.3–0.5 GB | **~0.9–1.1 GB** |
+
+### Rekomendowane `--gpu-concurrency` per karta
+
+| Karta (VRAM) | `large-v3-turbo` FP16 | `large-v3-turbo-q5_0` | `medium-q5_0` | `large-v3` FP16 |
+|---|---|---|---|---|
+| **RTX 3050 / 3050 Ti 4 GB (laptop)** | **1** | 1–2 | **2** (3 może padać OOM) | nie zmieści się |
+| RTX 3060 / 4060 8 GB | 2 | 4 | 6 | 1–2 |
+| RTX 4070 / 4080 12–16 GB | 4 | 8 | 12 | 3 |
+| L40 48 GB | 8–16 | 32+ | 32+ | 8 |
+
+> Liczby są punktem startowym – realne nasycenie znajduje się trybem `sweep` (`--concurrency 1,2,4,8`).
+
+### Jak zmniejszyć model
+
+W `appsettings.json`:
+
+```jsonc
+{
+  "Transcription": {
+    "ModelFileName": "ggml-medium-q5_0.bin",
+    "AutoDownloadModel": true,
+    "Whisper": {
+      "SamplingStrategy": "BeamSearch",
+      "BeamSize": 5
+    }
+  }
+}
+```
+
+Albo dla jeszcze mniejszego zużycia VRAM (ale niższej jakości / niższego RTF na małych plikach):
+
+```jsonc
+{
+  "Whisper": {
+    "SamplingStrategy": "Greedy",
+    "BeamSize": 1
+  }
+}
+```
+
+`Greedy` likwiduje większość KV cache beam search – pozwala podnieść `--gpu-concurrency` o 1–2 sloty na każdej karcie.
+
+### Reguła kciuka przy planowaniu testu
+
+1. Odczytaj wolny VRAM: `nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits` → wynik w MiB.
+2. Wybierz model z tabeli wyżej i odczytaj "razem per slot".
+3. `safe_slots = floor((free_MiB - 500) / per_slot_MiB)` (500 MiB zapasu dla sterownika i kontekstu Whisper.net).
+4. Zacznij od `safe_slots`, jeśli przejdzie cały `dataset` bez crashu, dopiero wtedy testuj `safe_slots + 1`.
+
+Przykład na RTX 3050 Ti 4 GB (3759 MiB free) z `medium-q5_0` (1.0 GB per slot):
+
+```text
+safe_slots = floor((3759 - 500) / 1024) = floor(3.18) = 3
+```
+
+W praktyce na tej konfiguracji `--gpu-concurrency 3` zwykle padnie przy dłuższych plikach – `2` jest stabilne. Zostaw 1 slot zapasu względem teoretycznej estymaty.
+
+---
+
+## 18. Monitoring GPU
+
+### a) Wbudowany `gpu-metrics.csv`
+
+Aplikacja sama zbiera próbki gdy `Benchmark.CollectGpuMetrics: true`. Trafia do `<OutputDirectory>/gpu-metrics.csv`. Kolumny:
+
+```text
+timestamp, index, name, utilization.gpu [%], memory.used [MiB], memory.total [MiB], power.draw [W], temperature.gpu [C]
+```
+
+Częstotliwość kontrolowana przez `Benchmark.GpuMetricsIntervalSeconds` (domyślnie 10). Na małych kartach warto skrócić do `1`, żeby wyłapać peaki:
+
+```jsonc
+"GpuMetricsIntervalSeconds": 1
+```
+
+> Uwaga: jeśli proces wywali się natywnym `abort()` (np. CUDA OOM w whisper.cpp), `GpuMetricsCollector` może nie zdążyć zapisać końcówki CSV – wtedy patrz pkt **b)**.
+
+### b) Drugi terminal – `nvidia-smi -l 1`
+
+Najpewniejsza metoda (działa niezależnie od naszego procesu, przeżywa SIGABRT):
+
+```bash
+nvidia-smi --query-gpu=timestamp,memory.used,memory.free,memory.total,utilization.gpu,power.draw,temperature.gpu \
+           --format=csv -l 1 \
+| tee gpu-watch.csv
+```
+
+`-l 1` = próbka co 1 sekundę. `tee` pisze równocześnie do pliku i konsoli – po crashu masz historię. Stop `Ctrl+C` po zakończeniu benchmarku.
+
+### c) Dashboard `nvidia-smi dmon`
+
+```bash
+nvidia-smi dmon -s pucvmet -c 0 -d 1
+```
+
+(`pucvmet` = power, utilization, clocks, video, memory, encoder, temperature; `-c 0` = bez limitu; `-d 1` = co 1s).
+
+### d) `nvtop`
+
+Interaktywny widok jak `htop`:
 
 ```bash
 nvtop
 ```
 
-Można też użyć:
+### e) Loop z większą rozdzielczością (0.5 s)
 
 ```bash
-nvidia-smi dmon
+while true; do
+  nvidia-smi --query-gpu=timestamp,memory.used,memory.free,utilization.gpu \
+             --format=csv,noheader,nounits
+  sleep 0.5
+done | tee gpu-watch-0.5s.csv
 ```
+
+### Playbook: zmierzyć peak VRAM podczas runu
+
+1. **Terminal A** (uruchom **pierwszy**):
+   ```bash
+   nvidia-smi --query-gpu=timestamp,memory.used,memory.free,utilization.gpu --format=csv -l 1 | tee gpu-watch.csv
+   ```
+2. **Terminal B** (benchmark):
+   ```bash
+   cd /home/aubuntu/ADSTranskrypcja/WhisperBenchmark
+   dotnet run -c Release --no-launch-profile -- dataset \
+     --input ./Data/Input --output ./Data/Output --gpu-concurrency 2 \
+     > run.stdout.log 2> run.stderr.log
+   echo "exit=$?"
+   ```
+3. Po zakończeniu w terminalu A `Ctrl+C`. W `gpu-watch.csv` odczytaj **peak `memory.used`** – masz realne zużycie do podstawienia w estymacie z sekcji 17.
 
 ---
 
-## 18. Diagnostyka: czy CUDA runtime jest widoczny
+## 19. Diagnostyka: "Kończy szybko bez wyników" / brak raportu
+
+Objaw: aplikacja loguje `Załadowano instancję modelu N/N` oraz `Dataset: wszystkie X jobów wrzucone do kolejki.`, **brak** `[00:00:10] mode=dataset ...`, **brak** `DATASET BENCHMARK FINISHED`, brak `benchmark-summary.json` (albo stary, z poprzedniego runa). Powłoka wraca do prompta po kilku sekundach.
+
+To prawie zawsze **silent SIGABRT z natywki** (whisper.cpp / ggml / sterownik CUDA): wątek natywny robi `abort()` zanim .NET zdąży złapać wyjątek i odpalić nasz `try/finally` z zapisem raportu.
+
+### Krok 1: odczytaj exit code
+
+```bash
+dotnet run -c Release --no-launch-profile -- dataset \
+  --input ./Data/Input --output ./Data/Output --gpu-concurrency 3
+echo "exit=$?"
+```
+
+| `exit` | Co znaczy | Działanie |
+|---|---|---|
+| `0` | OK | Powinno być `DATASET BENCHMARK FINISHED` – jeśli nie ma, sprawdź `./Data/Output`. |
+| `134` | SIGABRT z natywki (`GGML_ASSERT`, CUDA `cudaMalloc` == null) | Najczęściej VRAM OOM – patrz krok 2. |
+| `139` | SIGSEGV | Crash natywki – sprawdź `dmesg` i ldd na bibliotekach CUDA. |
+| `137` | SIGKILL | Najczęściej kernelowy OOM Killer – `dmesg \| tail` to potwierdzi. |
+| `130` | SIGINT (Ctrl+C) | Anulowane – aplikacja powinna zapisać raport częściowy. |
+| `2` | Wyjątek .NET | Stack w logu – zwykle błąd konfiguracji. |
+
+### Krok 2: rozdziel stdout / stderr i zajrzyj do stderr
+
+Natywne `GGML_ASSERT(...) failed` i `CUDA error: out of memory` lecą na **stderr**, nasze logi `info:` na **stdout**. Splatają się w jednym oknie i łatwo przegapić ślad. Rozdziel:
+
+```bash
+dotnet run -c Release --no-launch-profile -- dataset \
+  --input ./Data/Input --output ./Data/Output --gpu-concurrency 3 \
+  > run.stdout.log 2> run.stderr.log
+echo "exit=$?"
+tail -40 run.stderr.log
+```
+
+Charakterystyczne wpisy w `run.stderr.log`:
+
+```text
+/path/whisper.cpp/ggml/src/ggml-backend.cpp:194: GGML_ASSERT(buffer) failed
+```
+
+→ klasyczny CUDA OOM przy alokacji bufora (najczęściej przy 3. instancji modelu na karcie, która nie ma na to miejsca).
+
+```text
+CUDA error: out of memory
+```
+
+→ to samo, ale podczas alokacji KV cache w trakcie pierwszej transkrypcji (nie podczas ładowania).
+
+### Krok 3: zmierz peak VRAM z drugiego terminala
+
+Patrz sekcja 18.e) – playbook z dwoma terminalami. Jeżeli `memory.used` w `gpu-watch.csv` skoczy do `~memory.total` i zaraz potem `exit ≠ 0`, masz potwierdzony VRAM OOM.
+
+### Krok 4: sprawdź kernel log
+
+```bash
+sudo dmesg -T | tail -100 | grep -iE "oom|killed|dotnet|whisper"
+journalctl -k --since "5 minutes ago" | tail -100
+```
+
+### Krok 5: zwolnij GPU po crashu
+
+Po SIGABRT pamięć GPU bywa nieoddana przez ~10–30 s, czasem dłużej. Zanim odpalisz kolejny run:
+
+```bash
+pkill -f WhisperBenchmark
+nvidia-smi --query-gpu=memory.used,memory.free --format=csv
+```
+
+Jeśli `memory.used` nie spada poniżej ~300 MiB w ciągu minuty, restart sesji X / restart usługi NVIDIA (`sudo systemctl restart nvidia-persistenced`) albo `sudo reboot`.
+
+### Krok 6: napraw
+
+- **Najszybsza naprawa:** obniż `--gpu-concurrency` o 1.
+- **Średnia naprawa:** zmień model na mniejszy / skwantyzowany (sekcja 17 – tabela rekomendacji).
+- **Drobny zysk:** w `appsettings.json` `Whisper.BeamSize: 1` lub `Whisper.SamplingStrategy: "Greedy"` – mniej KV cache per slot.
+
+### Szybka ściągawka
+
+| Symptom | Najprawdopodobniejsza przyczyna | Pierwszy strzał |
+|---|---|---|
+| `Załadowano instancję modelu 2/3` i koniec | OOM przy ładowaniu N-tej kopii modelu | `--gpu-concurrency 2`, albo mniejszy model |
+| Logi `Załadowano N/N` i `wszystkie jobów wrzucone do kolejki`, ale brak `[00:00:10]` | OOM przy pierwszej alokacji KV cache | `BeamSize: 1` lub `--gpu-concurrency` -1 |
+| `[00:00:10]` jest, ale potem `exit=134` / `139` w trakcie | OOM przy dłuższym pliku | mniejszy model lub `BeamSize: 1` |
+| `runtime: Cpu, useGpu=True` w logu | Brak CUDA Toolkit / brak `libcudart` | patrz sekcja 21 |
+
+---
+
+## 20. Diagnostyka: czy CUDA runtime jest widoczny
 
 Sprawdź, czy paczki Whisper.net CUDA trafiły do builda:
 
@@ -554,7 +772,7 @@ ldconfig -p | grep -Ei "libcudart|libcublas|libcuda"
 
 ---
 
-## 19. Diagnostyka: aplikacja działa na CPU mimo `UseGpu=true`
+## 21. Diagnostyka: aplikacja działa na CPU mimo `UseGpu=true`
 
 Objaw:
 
@@ -595,7 +813,7 @@ runtime: Cuda
 
 ---
 
-## 20. Diagnostyka: `nvidia-smi` nie działa
+## 22. Diagnostyka: `nvidia-smi` nie działa
 
 Sprawdź sterowniki:
 
@@ -620,7 +838,7 @@ Jeżeli Secure Boot jest włączony i moduł NVIDIA się nie ładuje, najprości
 
 ---
 
-## 21. Diagnostyka: brak pliku wejściowego
+## 23. Diagnostyka: brak pliku wejściowego
 
 Objaw:
 
@@ -651,7 +869,7 @@ cp ./Data/Input/*.wav /data/input/
 
 ---
 
-## 22. Cursor / Remote SSH
+## 24. Cursor / Remote SSH
 
 Na Ubuntu:
 
@@ -699,7 +917,7 @@ Otwórz katalog:
 
 ---
 
-## 23. Komenda kontrolna po pełnej konfiguracji
+## 25. Komenda kontrolna po pełnej konfiguracji
 
 Po pełnej konfiguracji uruchom:
 
@@ -735,7 +953,7 @@ runtime: Cuda
 
 ---
 
-## 24. Minimalny skrót instalacyjny
+## 26. Minimalny skrót instalacyjny
 
 Dla świeżej maszyny Ubuntu 24.04 LTS:
 
