@@ -60,8 +60,8 @@ public static class Program
 
         var benchmarkSettings = ApplyCliOverrides(
             host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<BenchmarkSettings>>().Value, cli);
-        var transcriptionSettings = host.Services
-            .GetRequiredService<Microsoft.Extensions.Options.IOptions<TranscriptionSettings>>().Value;
+        var transcriptionSettings = ApplyTranscriptionCliOverrides(
+            host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<TranscriptionSettings>>().Value, cli);
 
         Directory.CreateDirectory(benchmarkSettings.OutputDirectory);
 
@@ -341,6 +341,42 @@ public static class Program
         }
 
         return src;
+    }
+
+    private static TranscriptionSettings ApplyTranscriptionCliOverrides(TranscriptionSettings src, CliOptions cli)
+    {
+        if (!string.IsNullOrWhiteSpace(cli.Model))
+        {
+            src.ModelFileName = NormalizeModelFileName(cli.Model!);
+        }
+
+        if (cli.Threads is int t)
+        {
+            if (t <= 0)
+            {
+                throw new ArgumentException("Parametr --threads musi być większy od zera.");
+            }
+
+            src.Threads = t;
+        }
+
+        return src;
+    }
+
+    private static string NormalizeModelFileName(string raw)
+    {
+        var name = raw.Trim();
+        if (name.EndsWith(".bin", StringComparison.OrdinalIgnoreCase))
+        {
+            return name;
+        }
+
+        if (!name.StartsWith("ggml-", StringComparison.OrdinalIgnoreCase))
+        {
+            name = "ggml-" + name;
+        }
+
+        return name + ".bin";
     }
 
     private sealed class HostMarker { }

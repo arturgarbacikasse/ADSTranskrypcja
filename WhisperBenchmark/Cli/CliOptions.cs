@@ -23,6 +23,9 @@ public sealed class CliOptions
     public bool? WriteTranscriptionJson { get; init; }
     public bool? CollectGpuMetrics { get; init; }
     public bool? Shuffle { get; init; }
+    /// <summary>Nazwa pliku modelu GGML (np. ggml-large-v3-turbo.bin lub large-v3-turbo).</summary>
+    public string? Model { get; init; }
+    public int? Threads { get; init; }
 
     public static CliOptions Parse(string[] args)
     {
@@ -59,6 +62,8 @@ public sealed class CliOptions
         bool? writeTranscription = null;
         bool? collectGpu = null;
         bool? shuffle = null;
+        string? model = null;
+        int? threads = null;
 
         for (int i = 1; i < args.Length; i++)
         {
@@ -112,6 +117,12 @@ public sealed class CliOptions
                 case "--shuffle":
                     shuffle = ParseBool(GetValue()!);
                     break;
+                case "--model":
+                    model = GetValue();
+                    break;
+                case "--threads":
+                    threads = int.Parse(GetValue()!, CultureInfo.InvariantCulture);
+                    break;
                 case "--help":
                 case "-h":
                     PrintHelp();
@@ -139,7 +150,9 @@ public sealed class CliOptions
             ConcurrencySweep = sweep,
             WriteTranscriptionJson = writeTranscription,
             CollectGpuMetrics = collectGpu,
-            Shuffle = shuffle
+            Shuffle = shuffle,
+            Model = model,
+            Threads = threads
         };
     }
 
@@ -165,11 +178,14 @@ public sealed class CliOptions
         Console.WriteLine("  --write-transcription-json true   zapis pełnej transkrypcji per plik");
         Console.WriteLine("  --collect-gpu-metrics true/false  zbieranie nvidia-smi (domyślnie z appsettings)");
         Console.WriteLine("  --shuffle true/false              losowa kolejność plików (dataset/soak)");
+        Console.WriteLine("  --model <name>                    plik modelu GGML (np. ggml-large-v3-turbo.bin lub large-v3-turbo)");
+        Console.WriteLine("  --threads <int>                   wątki CPU whisper.cpp per transkrypcja");
         Console.WriteLine();
         Console.WriteLine("Przykłady:");
         Console.WriteLine("  WhisperBenchmark single --file ./Data/Input/100/100_1.wav");
         Console.WriteLine("  WhisperBenchmark soak --input ./Data/Input --output ./Data/Output --duration-minutes 60 --gpu-concurrency 4");
-        Console.WriteLine("  WhisperBenchmark dataset --input ./Data/Input --output ./Data/Output --gpu-concurrency 4");
+        Console.WriteLine("  WhisperBenchmark dataset --input ./Data/Input --output ./Data/Output --gpu-concurrency 4 --threads 4");
+        Console.WriteLine("  WhisperBenchmark dataset --input ./data/input --output ./data/output --gpu-concurrency 8 --model large-v3-turbo --threads 2");
         Console.WriteLine("  WhisperBenchmark sweep --input ./Data/Input --output ./Data/Output --duration-minutes 10 --concurrency 1,2,4,8,16");
         Console.WriteLine();
     }
