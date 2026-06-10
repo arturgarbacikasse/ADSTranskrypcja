@@ -21,11 +21,28 @@ public sealed class CliOptions
     public int? MaxFiles { get; init; }
     public IReadOnlyList<int>? ConcurrencySweep { get; init; }
     public bool? WriteTranscriptionJson { get; init; }
+    public bool? WritePerFileJson { get; init; }
+    public bool? WriteMergedCallJson { get; init; }
     public bool? CollectGpuMetrics { get; init; }
     public bool? Shuffle { get; init; }
+    public int? WarmupFiles { get; init; }
+    public int? MetricsIntervalSeconds { get; init; }
+    public int? GpuMetricsIntervalSeconds { get; init; }
+
     /// <summary>Nazwa pliku modelu GGML (np. ggml-large-v3-turbo.bin lub large-v3-turbo).</summary>
     public string? Model { get; init; }
+    /// <summary>Język transkrypcji ISO 639-1 (np. pl, en) lub auto.</summary>
+    public string? Language { get; init; }
     public int? Threads { get; init; }
+    public bool? UseGpu { get; init; }
+    public int? GpuDevice { get; init; }
+    public string? ModelsDirectory { get; init; }
+    public bool? AutoDownloadModel { get; init; }
+    public string? SamplingStrategy { get; init; }
+    public int? BeamSize { get; init; }
+    public string? InitialPrompt { get; init; }
+    public float? Temperature { get; init; }
+    public bool? Translate { get; init; }
 
     public static CliOptions Parse(string[] args)
     {
@@ -60,10 +77,25 @@ public sealed class CliOptions
         int? maxFiles = null;
         IReadOnlyList<int>? sweep = null;
         bool? writeTranscription = null;
+        bool? writePerFile = null;
+        bool? writeMergedCall = null;
         bool? collectGpu = null;
         bool? shuffle = null;
+        int? warmupFiles = null;
+        int? metricsInterval = null;
+        int? gpuMetricsInterval = null;
         string? model = null;
+        string? language = null;
         int? threads = null;
+        bool? useGpu = null;
+        int? gpuDevice = null;
+        string? modelsDirectory = null;
+        bool? autoDownloadModel = null;
+        string? samplingStrategy = null;
+        int? beamSize = null;
+        string? initialPrompt = null;
+        float? temperature = null;
+        bool? translate = null;
 
         for (int i = 1; i < args.Length; i++)
         {
@@ -111,17 +143,62 @@ public sealed class CliOptions
                 case "--write-transcription-json":
                     writeTranscription = ParseBool(GetValue()!);
                     break;
+                case "--write-per-file-json":
+                    writePerFile = ParseBool(GetValue()!);
+                    break;
+                case "--write-merged-call-json":
+                    writeMergedCall = ParseBool(GetValue()!);
+                    break;
                 case "--collect-gpu-metrics":
                     collectGpu = ParseBool(GetValue()!);
                     break;
                 case "--shuffle":
                     shuffle = ParseBool(GetValue()!);
                     break;
+                case "--warmup-files":
+                    warmupFiles = int.Parse(GetValue()!, CultureInfo.InvariantCulture);
+                    break;
+                case "--metrics-interval-seconds":
+                    metricsInterval = int.Parse(GetValue()!, CultureInfo.InvariantCulture);
+                    break;
+                case "--gpu-metrics-interval-seconds":
+                    gpuMetricsInterval = int.Parse(GetValue()!, CultureInfo.InvariantCulture);
+                    break;
                 case "--model":
                     model = GetValue();
                     break;
+                case "--language":
+                    language = GetValue();
+                    break;
                 case "--threads":
                     threads = int.Parse(GetValue()!, CultureInfo.InvariantCulture);
+                    break;
+                case "--use-gpu":
+                    useGpu = ParseBool(GetValue()!);
+                    break;
+                case "--gpu-device":
+                    gpuDevice = int.Parse(GetValue()!, CultureInfo.InvariantCulture);
+                    break;
+                case "--models-directory":
+                    modelsDirectory = GetValue();
+                    break;
+                case "--auto-download-model":
+                    autoDownloadModel = ParseBool(GetValue()!);
+                    break;
+                case "--sampling-strategy":
+                    samplingStrategy = GetValue();
+                    break;
+                case "--beam-size":
+                    beamSize = int.Parse(GetValue()!, CultureInfo.InvariantCulture);
+                    break;
+                case "--initial-prompt":
+                    initialPrompt = GetValue();
+                    break;
+                case "--temperature":
+                    temperature = float.Parse(GetValue()!, CultureInfo.InvariantCulture);
+                    break;
+                case "--translate":
+                    translate = ParseBool(GetValue()!);
                     break;
                 case "--help":
                 case "-h":
@@ -149,10 +226,25 @@ public sealed class CliOptions
             MaxFiles = maxFiles,
             ConcurrencySweep = sweep,
             WriteTranscriptionJson = writeTranscription,
+            WritePerFileJson = writePerFile,
+            WriteMergedCallJson = writeMergedCall,
             CollectGpuMetrics = collectGpu,
             Shuffle = shuffle,
+            WarmupFiles = warmupFiles,
+            MetricsIntervalSeconds = metricsInterval,
+            GpuMetricsIntervalSeconds = gpuMetricsInterval,
             Model = model,
-            Threads = threads
+            Language = language,
+            Threads = threads,
+            UseGpu = useGpu,
+            GpuDevice = gpuDevice,
+            ModelsDirectory = modelsDirectory,
+            AutoDownloadModel = autoDownloadModel,
+            SamplingStrategy = samplingStrategy,
+            BeamSize = beamSize,
+            InitialPrompt = initialPrompt,
+            Temperature = temperature,
+            Translate = translate
         };
     }
 
@@ -167,7 +259,7 @@ public sealed class CliOptions
         Console.WriteLine("  sweep   – porównanie wielu wartości GpuConcurrency.");
         Console.WriteLine("  dataset – przetwarza cały InputDirectory dokładnie raz (rekomendowany POC).");
         Console.WriteLine();
-        Console.WriteLine("Wspólne opcje:");
+        Console.WriteLine("Opcje benchmarku:");
         Console.WriteLine("  --file <path>                     plik WAV (tryb single)");
         Console.WriteLine("  --input <dir>                     katalog główny: {interactionId}/*.wav");
         Console.WriteLine("  --output <dir>                    katalog raportów");
@@ -175,18 +267,38 @@ public sealed class CliOptions
         Console.WriteLine("  --gpu-concurrency <int>           równoległość transkrypcji na GPU");
         Console.WriteLine("  --concurrency 1,2,4,8             lista concurrencies dla trybu sweep");
         Console.WriteLine("  --max-files <int>                 twardy limit liczby plików");
-        Console.WriteLine("  --write-transcription-json true   zapis pełnej transkrypcji per plik");
-        Console.WriteLine("  --collect-gpu-metrics true/false  zbieranie nvidia-smi (domyślnie z appsettings)");
+        Console.WriteLine("  --warmup-files <int>              pliki warmup przed pomiarem (soak; dataset=0)");
         Console.WriteLine("  --shuffle true/false              losowa kolejność plików (dataset/soak)");
-        Console.WriteLine("  --model <name>                    plik modelu GGML (np. ggml-large-v3-turbo.bin lub large-v3-turbo)");
-        Console.WriteLine("  --threads <int>                   wątki CPU whisper.cpp per transkrypcja");
+        Console.WriteLine("  --write-transcription-json true   zapis transkrypcji per plik");
+        Console.WriteLine("  --write-per-file-json true        zapis metryk per plik (debug)");
+        Console.WriteLine("  --write-merged-call-json true     scalony JSON per interactionId");
+        Console.WriteLine("  --collect-gpu-metrics true/false  zbieranie nvidia-smi");
+        Console.WriteLine("  --metrics-interval-seconds <int>  log postępu na konsoli");
+        Console.WriteLine("  --gpu-metrics-interval-seconds    odstęp próbek nvidia-smi");
         Console.WriteLine();
-        Console.WriteLine("Przykłady:");
-        Console.WriteLine("  WhisperBenchmark single --file ./Data/Input/100/100_1.wav");
-        Console.WriteLine("  WhisperBenchmark soak --input ./Data/Input --output ./Data/Output --duration-minutes 60 --gpu-concurrency 4");
-        Console.WriteLine("  WhisperBenchmark dataset --input ./Data/Input --output ./Data/Output --gpu-concurrency 4 --threads 4");
-        Console.WriteLine("  WhisperBenchmark dataset --input ./data/input --output ./data/output --gpu-concurrency 8 --model large-v3-turbo --threads 2");
-        Console.WriteLine("  WhisperBenchmark sweep --input ./Data/Input --output ./Data/Output --duration-minutes 10 --concurrency 1,2,4,8,16");
+        Console.WriteLine("Opcje transkrypcji:");
+        Console.WriteLine("  --model <name>                    plik modelu GGML (np. large-v3-turbo)");
+        Console.WriteLine("  --models-directory <dir>          katalog z modelami (domyślnie ./Models)");
+        Console.WriteLine("  --language <code>                 język ISO 639-1 (pl, en, tr) lub auto");
+        Console.WriteLine("  --threads <int>                   wątki CPU whisper.cpp");
+        Console.WriteLine("  --use-gpu true/false              włącz/wyłącz CUDA");
+        Console.WriteLine("  --gpu-device <int>                indeks GPU (zwykle 0)");
+        Console.WriteLine("  --auto-download-model true/false  pobieranie modelu z Hugging Face");
+        Console.WriteLine("  --sampling-strategy Greedy|BeamSearch");
+        Console.WriteLine("  --beam-size <int>                 rozmiar wiązki (BeamSearch)");
+        Console.WriteLine("  --initial-prompt <text>           prompt początkowy Whispera");
+        Console.WriteLine("  --temperature <float>             temperatura próbkowania");
+        Console.WriteLine("  --translate true/false            tłumaczenie na angielski");
+        Console.WriteLine();
+        Console.WriteLine("Przykład (dataset, wszystkie kluczowe parametry):");
+        Console.WriteLine("  WhisperBenchmark dataset \\");
+        Console.WriteLine("    --input ./data/bench-37 --output ./data/output-run \\");
+        Console.WriteLine("    --gpu-concurrency 2 --shuffle false \\");
+        Console.WriteLine("    --write-transcription-json true --write-merged-call-json true --write-per-file-json false \\");
+        Console.WriteLine("    --collect-gpu-metrics true --metrics-interval-seconds 10 --gpu-metrics-interval-seconds 10 \\");
+        Console.WriteLine("    --model large-v3-turbo --models-directory ./Models --language pl --threads 4 \\");
+        Console.WriteLine("    --use-gpu true --gpu-device 0 --auto-download-model false \\");
+        Console.WriteLine("    --sampling-strategy BeamSearch --beam-size 5 --temperature 0 --translate false");
         Console.WriteLine();
     }
 

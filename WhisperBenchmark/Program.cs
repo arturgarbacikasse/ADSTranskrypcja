@@ -331,13 +331,21 @@ public static class Program
         if (cli.GpuConcurrency is int c && c > 0) src.GpuConcurrency = c;
         if (cli.MaxFiles is int m && m > 0) src.MaxFiles = m;
         if (cli.WriteTranscriptionJson is bool w) src.WriteTranscriptionJson = w;
+        if (cli.WritePerFileJson is bool pf) src.WritePerFileJson = pf;
+        if (cli.WriteMergedCallJson is bool mc) src.WriteMergedCallJson = mc;
         if (cli.CollectGpuMetrics is bool g) src.CollectGpuMetrics = g;
         if (cli.Shuffle is bool sh) src.ShuffleInput = sh;
+        if (cli.MetricsIntervalSeconds is int mis && mis > 0) src.MetricsIntervalSeconds = mis;
+        if (cli.GpuMetricsIntervalSeconds is int gmis && gmis > 0) src.GpuMetricsIntervalSeconds = gmis;
 
         if (cli.Mode == BenchmarkMode.Dataset)
         {
             src.WarmupFiles = 0;
             src.RepeatInputUntilDurationEnds = false;
+        }
+        else if (cli.WarmupFiles is int wf && wf >= 0)
+        {
+            src.WarmupFiles = wf;
         }
 
         return src;
@@ -350,6 +358,11 @@ public static class Program
             src.ModelFileName = NormalizeModelFileName(cli.Model!);
         }
 
+        if (!string.IsNullOrWhiteSpace(cli.Language))
+        {
+            src.Language = cli.Language.Trim();
+        }
+
         if (cli.Threads is int t)
         {
             if (t <= 0)
@@ -359,6 +372,40 @@ public static class Program
 
             src.Threads = t;
         }
+
+        if (cli.UseGpu is bool ug) src.UseGpu = ug;
+        if (cli.GpuDevice is int gd && gd >= 0) src.GpuDevice = gd;
+        if (!string.IsNullOrWhiteSpace(cli.ModelsDirectory)) src.ModelsDirectory = cli.ModelsDirectory!;
+        if (cli.AutoDownloadModel is bool adm) src.AutoDownloadModel = adm;
+
+        if (!string.IsNullOrWhiteSpace(cli.SamplingStrategy))
+        {
+            var strategy = cli.SamplingStrategy.Trim();
+            if (!strategy.Equals("Greedy", StringComparison.OrdinalIgnoreCase)
+                && !strategy.Equals("BeamSearch", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException(
+                    "Parametr --sampling-strategy musi być Greedy lub BeamSearch.");
+            }
+
+            src.Whisper.SamplingStrategy = strategy.Equals("BeamSearch", StringComparison.OrdinalIgnoreCase)
+                ? "BeamSearch"
+                : "Greedy";
+        }
+
+        if (cli.BeamSize is int bs)
+        {
+            if (bs <= 0)
+            {
+                throw new ArgumentException("Parametr --beam-size musi być większy od zera.");
+            }
+
+            src.Whisper.BeamSize = bs;
+        }
+
+        if (cli.InitialPrompt is not null) src.Whisper.InitialPrompt = cli.InitialPrompt;
+        if (cli.Temperature is float temp && temp >= 0) src.Whisper.Temperature = temp;
+        if (cli.Translate is bool tr) src.Whisper.Translate = tr;
 
         return src;
     }

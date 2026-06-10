@@ -76,6 +76,7 @@ WhisperBenchmark/Models/*
 data/input/
 data/output/
 data/models/
+WhisperBenchmark/data/
 models/
 outputs/
 transcriptions/
